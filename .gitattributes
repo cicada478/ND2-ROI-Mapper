@@ -1,0 +1,16 @@
+* text=auto
+
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.toml text eol=lf
+*.ps1 text eol=lf
+*.spec text eol=lf
+*.template text eol=lf
+*.vbs text eol=crlf
+*.iss text eol=crlf
+
+*.nd2 binary
+*.png binary
+*.jpg binary
+*.jpeg binary

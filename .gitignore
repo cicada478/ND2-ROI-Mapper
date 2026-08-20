@@ -1,0 +1,39 @@
+# Local Python environments and caches
+.venv/
+venv/
+.build-venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local development tools
+.agents/
+.codex/
+.tools/
+.idea/
+.vscode/
+
+# Release build output
+build/
+dist/
+release/
+.release-staging/
+.qa-release/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Microscopy source data and generated exports
+*.nd2
+*_ROI_map.jpg
+*_ROI_map.jpeg
+*_ROI_map.png
+output/
+exports/
+
+# Local diagnostics
+*.log

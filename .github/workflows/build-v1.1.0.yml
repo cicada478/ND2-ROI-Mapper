@@ -1,0 +1,68 @@
+name: Build v1.1.0 release artifacts
+
+on:
+  push:
+    branches:
+      - codex/scale-bars-v1.1.0
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APP_VERSION: 1.1.0
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  windows-portable:
+    name: Windows Portable ZIP
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Build and test Windows package
+        shell: pwsh
+        run: .\build_release.ps1 -Version $env:APP_VERSION -PythonVersion $env:PYTHON_VERSION
+      - name: Verify packaged CLI
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath '.\dist\ND2 ROI Mapper\ND2 ROI Mapper.exe' -ArgumentList '--version' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw 'Packaged CLI smoke test failed.' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ND2-ROI-Mapper-Windows-Portable-v1.1.0
+          path: release/ND2-ROI-Mapper-Windows-Portable-v1.1.0.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  macos:
+    name: macOS ${{ matrix.arch_label }} ZIP
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch_label: Apple-Silicon
+          - runner: macos-15-intel
+            arch_label: Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Build and smoke-test macOS application
+        shell: bash
+        run: bash ./build_macos_release.sh "$APP_VERSION" "${{ matrix.arch_label }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ND2-ROI-Mapper-macOS-${{ matrix.arch_label }}-v1.1.0
+          path: release/ND2-ROI-Mapper-macOS-${{ matrix.arch_label }}-v1.1.0.zip
+          if-no-files-found: error
+          compression-level: 0

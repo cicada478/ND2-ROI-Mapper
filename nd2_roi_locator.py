@@ -24,6 +24,9 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 
+APP_VERSION = "1.1.0"
+
+
 # ============================================================================
 # 第一部分：显微镜坐标校准参数（坐标不对时，优先检查这里）
 # ============================================================================
@@ -133,6 +136,32 @@ class ROIResult:
             self.center_x_px + self.width_px / 2,
             self.center_y_px + self.height_px / 2,
         )
+
+
+@dataclass(frozen=True)
+class ScaleBarOverlay:
+    """一个待绘制的物理比例尺，位置使用最终 10X 图像像素坐标。
+
+    比例尺的物理长度始终以 µm 保存，绘制时才除以 10X 的 X 向物理像素尺寸。
+    这样 Viewer 的 fit/zoom/pan 不会进入科学换算，也不会改变导出长度。
+    """
+
+    center_x_px: float
+    bar_y_px: float
+    length_um: float = 10.0
+    pixel_size_um: float = 1.0
+    color: tuple[int, int, int] = (255, 255, 255)
+    line_width_px: int = 4
+
+    @property
+    def length_px(self) -> float:
+        """返回比例尺在最终 10X 图像中的像素长度。"""
+
+        if self.pixel_size_um <= 0:
+            raise ValueError("Scale bar pixel size must be greater than zero.")
+        if self.length_um <= 0:
+            raise ValueError("Scale bar length must be greater than zero.")
+        return self.length_um / self.pixel_size_um
 
 
 class MetadataError(RuntimeError):
@@ -601,10 +630,12 @@ def calculate_roi_position(
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """按 Windows/Linux 顺序寻找字体；都找不到时使用 Pillow 默认字体。"""
+    """按 Windows/macOS/Linux 顺序寻找字体；都找不到时使用 Pillow 默认字体。"""
 
     candidates = (
         Path("C:/Windows/Fonts/arial.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+        Path("/System/Library/Fonts/Helvetica.ttc"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     )
     for candidate in candidates:
@@ -613,6 +644,73 @@ def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         except OSError:
             continue
     return ImageFont.load_default()
+
+
+def scale_bar_font_size(image_size: tuple[int, int]) -> int:
+    """返回比例尺标签在最终导出图像中的字号。"""
+
+    return max(14, round(min(image_size) / 75))
+
+
+def format_scale_bar_length(length_um: float) -> str:
+    """把物理长度格式化成紧凑、带单位的比例尺标签。"""
+
+    return f"{length_um:g} µm"
+
+
+def scale_bar_label_size(length_um: float, image_size: tuple[int, int]) -> tuple[int, int]:
+    """返回与导出绘制一致的比例尺标签宽高，供 Viewer 做边界约束。"""
+
+    font = _font(scale_bar_font_size(image_size))
+    label = format_scale_bar_length(length_um)
+    probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    box = probe.textbbox((0, 0), label, font=font, stroke_width=1)
+    return box[2] - box[0], box[3] - box[1]
+
+
+def draw_scale_bars(image: Image.Image, scale_bars: Iterable[ScaleBarOverlay]) -> Image.Image:
+    """把比例尺绘制到图像副本上，不修改输入图像。
+
+    比例尺中心、基线位置和线宽均使用最终图像像素；物理长度通过
+    ``length_um / pixel_size_um`` 换算。文字与线条增加反色细描边，保证在复杂
+    免疫荧光背景上仍然可见，但主体颜色保持用户选择的颜色。
+    """
+
+    output = image.copy().convert("RGB")
+    draw = ImageDraw.Draw(output)
+    font = _font(scale_bar_font_size(output.size))
+
+    for scale_bar in scale_bars:
+        length_px = scale_bar.length_px
+        width = max(1, int(scale_bar.line_width_px))
+        center_x = float(scale_bar.center_x_px)
+        bar_y = float(scale_bar.bar_y_px)
+        left = center_x - length_px / 2
+        right = center_x + length_px / 2
+        label = format_scale_bar_length(scale_bar.length_um)
+        text_box = draw.textbbox((0, 0), label, font=font, stroke_width=1)
+        text_width = text_box[2] - text_box[0]
+        text_height = text_box[3] - text_box[1]
+        gap = max(4, width + 1)
+        text_x = center_x - text_width / 2
+        text_y = bar_y - gap - text_height
+
+        red, green, blue = scale_bar.color
+        luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+        contrast = (0, 0, 0) if luminance >= 140 else (255, 255, 255)
+        shadow_width = width + 2
+        draw.line((left, bar_y, right, bar_y), fill=contrast, width=shadow_width)
+        draw.line((left, bar_y, right, bar_y), fill=scale_bar.color, width=width)
+        draw.text(
+            (text_x, text_y),
+            label,
+            font=font,
+            fill=scale_bar.color,
+            stroke_width=1,
+            stroke_fill=contrast,
+        )
+
+    return output
 
 
 def _intersection_area(
@@ -986,6 +1084,7 @@ def _parse_args() -> argparse.Namespace:
             "using stage coordinates and physical pixel sizes."
         )
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
     parser.add_argument("--low", help="10X/low-magnification ND2")
     parser.add_argument(
         "--high",

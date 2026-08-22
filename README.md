@@ -1,6 +1,6 @@
 # ND2 ROI Mapper
 
-ND2 ROI Mapper 是一个面向显微成像实验的 Windows 桌面工具。它读取 Nikon
+ND2 ROI Mapper 是一个面向显微成像实验的 Windows/macOS 桌面工具。它读取 Nikon
 `.nd2` 文件中的载物台中心坐标和物理像素尺寸，将一个或多个 60X/100X
 高倍视野映射到对应的 10X 总览图，并导出带 ROI 标注的 JPG 或 PNG。
 
@@ -15,27 +15,24 @@ ND2 ROI Mapper 是一个面向显微成像实验的 Windows 桌面工具。它�
 - 根据高倍图像真实视野尺寸计算 ROI 矩形大小。
 - 使用不同颜色区分多个 ROI，并自动避让相邻标签。
 - 支持 10X 图像的适应窗口、缩放、平移和像素坐标查看。
+- 支持可拖动的 10X 比例尺，以及限制在各自 ROI 内的 Zoom in 比例尺。
+- 比例尺默认白色、10 µm；右键可选择 1000/100/10/1 µm、颜色、线宽和位置。
 - 导出全分辨率 JPG（默认）或 PNG。
 
 ## 系统要求
 
-- Windows 10（1809 或更高版本）或 Windows 11，64 位系统。
-- 使用 Release 安装版或便携版时，不需要安装 Python，也不需要联网安装依赖。
+- Windows 10（1809 或更高版本）或 Windows 11，64 位系统；或者受支持的 64 位
+  macOS。macOS Release 分为 Apple Silicon 与 Intel 两种架构。
+- 使用 Release 便携版时，不需要安装 Python，也不需要联网安装依赖。
 - 从源码运行时需要 Python 3.10 或更高版本。
 
 ## 下载与运行
 
-GitHub Release 提供两种形式：
+v1.1.0 GitHub Release 不再提供 Windows Setup EXE，提供以下压缩包：
 
-### 安装版
+### Windows Portable
 
-下载 `ND2-ROI-Mapper-Setup-v1.0.0.exe` 后双击运行。安装程序默认安装到当前
-Windows 用户的本地应用目录，不要求管理员权限，并会创建开始菜单快捷方式；桌面
-快捷方式可以在安装时选择。
-
-### 便携版
-
-下载 `ND2-ROI-Mapper-Portable-v1.0.0.zip`，完整解压后双击其中的：
+下载 `ND2-ROI-Mapper-Windows-Portable-v1.1.0.zip`，完整解压后双击其中的：
 
 ```text
 ND2 ROI Mapper.exe
@@ -43,13 +40,23 @@ ND2 ROI Mapper.exe
 
 请保留 `ND2 ROI Mapper.exe` 与同目录的 `_internal` 文件夹，不要只复制 EXE。
 
-当前 Release 未进行商业代码签名。Windows 首次运行下载的 EXE 时可能显示
-SmartScreen 提示；应仅从项目官方 GitHub Release 下载，并核对发布页提供的
-SHA-256。
+### macOS
+
+根据 Mac 芯片选择：
+
+- Apple Silicon（M1/M2/M3/M4 等）：`ND2-ROI-Mapper-macOS-Apple-Silicon-v1.1.0.zip`
+- Intel：`ND2-ROI-Mapper-macOS-Intel-v1.1.0.zip`
+
+完整解压后，将 `ND2 ROI Mapper.app` 拖入 `Applications`，再打开应用。当前 macOS
+应用尚未使用 Apple Developer ID 签名或公证；首次运行可能需要在 Finder 中按住
+Control 点击应用，选择 `Open` 并确认。
+
+当前 Release 未进行商业代码签名。Windows 可能显示 SmartScreen，macOS 可能显示
+Gatekeeper 提示；应仅从项目官方 GitHub Release 下载，并核对发布页提供的 SHA-256。
 
 ## 从源码运行
 
-克隆或下载源码后，双击：
+Windows 克隆或下载源码后，可以双击：
 
 ```text
 run_nd2_roi_locator.vbs
@@ -58,6 +65,15 @@ run_nd2_roi_locator.vbs
 该启动器会在项目目录中创建 `.venv`、安装缺失的依赖，并通过 `pythonw.exe`
 启动程序，因此不会保留命令提示符窗口。首次运行需要联网下载依赖，可能等待一段
 时间；创建环境、安装依赖或启动失败时会显示明确的消息框。
+
+macOS/Linux 从源码运行：
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python nd2_roi_locator.py
+```
 
 ## 使用流程
 
@@ -69,7 +85,12 @@ run_nd2_roi_locator.vbs
    - `Inverted`：`X_SIGN = -1`，`Y_SIGN = 1`
 5. 点击 `Calculate & Preview ROIs`。
 6. 检查 ROI 位置、标签、metadata 和越界警告。
-7. 点击 `Export Annotated Image`，保存为 JPG 或 PNG。
+7. 可点击 Viewer 顶部的 `10X scale bar` 或 `Zoom in scale bar`：
+   - 拖动比例尺改变位置；10X 比例尺限制在 overview 内，Zoom in 比例尺限制在
+     各自 ROI 内。
+   - 右键比例尺可设置物理长度、颜色、线宽或位置预设。
+   - 选中比例尺后也可用 `Shift + 方向键` 微调位置。
+8. 点击 `Export Annotated Image`，保存为 JPG 或 PNG。
 
 移除 10X overview 时，程序会同时清空依赖该底图的高倍文件列表和 ROI 预览，
 避免把不同采集批次的数据混合映射。
@@ -82,6 +103,9 @@ run_nd2_roi_locator.vbs
 后，ROI 框大小仍能随 ND2 中记录的 `µm/px` 正确变化。
 
 显示层的 Fit、Zoom 和 Pan 只改变查看方式，不参与坐标换算，也不会改变导出图像。
+比例尺同样保存为独立显示层：物理长度使用 `length_um / 10X_pixel_size_x_um`
+换算成最终 10X 图像像素。Zoom in 比例尺虽然限制在对应 ROI 内，仍使用 10X 像素
+尺寸绘制，因为 ROI overlay 与最终导出图像都处于同一个 10X 像素坐标系。
 
 ## 校准参数
 
@@ -124,10 +148,13 @@ OBJECTIVE_OFFSET = {
 ├── nd2_roi_ui.py            # Tkinter GUI、状态管理、预览和导出
 ├── run_nd2_roi_locator.vbs  # Windows 无控制台启动器
 ├── requirements.txt         # 运行依赖
-├── requirements-build.txt   # 固定版本的 Windows 打包依赖
-├── nd2_roi_mapper.spec      # PyInstaller 独立应用配置
-├── build_release.ps1        # 一键构建两种 Release 产物
-├── installer/               # Inno Setup 安装程序配置
+├── requirements-build.txt   # Windows/macOS 打包依赖
+├── nd2_roi_mapper.spec      # Windows/macOS PyInstaller 独立应用配置
+├── build_release.ps1        # 构建 Windows Portable ZIP
+├── build_macos_release.sh   # 构建并验证 macOS App ZIP
+├── .github/workflows/       # 原生 Windows、Apple Silicon 与 Intel 构建
+├── tests/                   # 比例尺物理换算和范围约束测试
+├── installer/               # v1.0.0 的旧 Inno Setup 配置，不用于 v1.1.0
 ├── packaging/               # 打包 hook 与 Windows 版本资源
 ├── pyproject.toml           # Python 格式化规则
 ├── .editorconfig            # 编辑器编码、缩进和换行规则
@@ -152,29 +179,35 @@ OBJECTIVE_OFFSET = {
   定量荧光强度分析。
 - 不同 Nikon/NIS-Elements 版本的 metadata 结构可能不同。必要字段缺失时，GUI
   会显示可读错误；命令行模式会输出完整 metadata 结构，便于进一步适配。
+- 比例尺当前为水平方向，物理长度使用 10X 的 X 向像素尺寸。
+- macOS 应用尚未使用 Apple Developer ID 签名或 Apple notarization。
 
-## 构建 Windows Release
+## 构建 Release
 
-构建机需要 Windows 10/11 x64、Python 3.13 和 Inno Setup 7。运行：
+Windows 构建机需要 Windows 10/11 x64 和 Python 3.13：
 
 ```powershell
-.\build_release.ps1 -Version 1.0.0 -PythonVersion 3.13
+.\build_release.ps1 -Version 1.1.0 -PythonVersion 3.13
 ```
 
-脚本会在项目内创建隔离的 `.build-venv`，根据 `requirements-build.txt` 安装固定
-版本依赖，使用 PyInstaller 生成无控制台的独立应用，再使用 Inno Setup 同时生成：
+脚本会在项目内创建隔离的 `.build-venv`，安装构建依赖，并使用 PyInstaller 生成：
 
 ```text
-release/ND2-ROI-Mapper-Setup-v1.0.0.exe
-release/ND2-ROI-Mapper-Portable-v1.0.0.zip
+release/ND2-ROI-Mapper-Windows-Portable-v1.1.0.zip
 ```
 
-`build/`、`dist/`、`release/`、`.build-venv/` 和项目内的 `.tools/` 均为本地构建
-内容，不提交到 Git。上传 GitHub Release 前，应在干净 Windows 环境验证安装、启动、
-卸载及 Portable 启动，并为两个文件生成 SHA-256。
+macOS 必须在对应架构的 Mac 上原生构建：
 
-本项目当前使用 Inno Setup 7 构建安装包。其官方许可区分非商业与商业使用；商业
-发布前，发布者应自行确认并取得适用许可。
+```bash
+bash ./build_macos_release.sh 1.1.0 Apple-Silicon
+```
+
+项目的 GitHub Actions 会分别在 Windows x64、macOS Apple Silicon 和 macOS Intel
+runner 上运行测试、PyInstaller 构建、冻结应用启动检查及压缩。PyInstaller 不能在
+Windows 上交叉生成可信的 macOS `.app`，因此不要手工把 Windows 产物改名为 macOS 包。
+
+`build/`、`dist/`、`release/`、`.build-venv/` 和项目内的 `.tools/` 均为本地构建
+内容，不提交到 Git。上传 GitHub Release 前，应验证 ZIP 完整性并生成 SHA-256。
 
 ## 开发约定
 

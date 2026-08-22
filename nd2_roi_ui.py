@@ -24,13 +24,18 @@ from nd2_roi_locator import (
     MetadataError,
     ND2Metadata,
     ROIResult,
+    ScaleBarOverlay,
     _default_output,
     _print_metadata,
     _print_result,
     calculate_roi_position,
+    draw_scale_bars,
     draw_rois,
+    format_scale_bar_length,
     read_nd2_image,
     read_nd2_metadata,
+    scale_bar_font_size,
+    scale_bar_label_size,
 )
 
 
@@ -69,6 +74,16 @@ ROI_COLORS = (
     (119, 164, 255),
 )
 
+SCALE_BAR_LENGTHS_UM = (1000.0, 100.0, 10.0, 1.0)
+SCALE_BAR_COLORS = {
+    "White": (255, 255, 255),
+    "Yellow": (255, 218, 56),
+    "Cyan": (49, 214, 232),
+    "Magenta": (246, 112, 221),
+    "Black": (0, 0, 0),
+}
+SCALE_BAR_WIDTHS_PX = (2, 4, 6, 8)
+
 
 @dataclass(frozen=True)
 class HighMagItem:
@@ -76,6 +91,31 @@ class HighMagItem:
 
     path: Path
     metadata: ND2Metadata
+
+
+@dataclass
+class ScaleBarState:
+    """Viewer 中一个可交互比例尺；所有位置仍使用 10X 原图像素坐标。"""
+
+    key: str
+    scope_name: str
+    bounds: tuple[float, float, float, float]
+    pixel_size_um: float
+    center_x_px: float = 0.0
+    bar_y_px: float = 0.0
+    length_um: float = 10.0
+    color_name: str = "White"
+    line_width_px: int = 4
+
+    def overlay(self) -> ScaleBarOverlay:
+        return ScaleBarOverlay(
+            center_x_px=self.center_x_px,
+            bar_y_px=self.bar_y_px,
+            length_um=self.length_um,
+            pixel_size_um=self.pixel_size_um,
+            color=SCALE_BAR_COLORS[self.color_name],
+            line_width_px=self.line_width_px,
+        )
 
 
 class MetadataPanel(ttk.Frame):
@@ -197,8 +237,13 @@ class ScrollablePanel(ttk.Frame):
 class ImageViewer(ttk.Frame):
     """保持科研坐标独立的 fit/zoom/pan 图像查看器。"""
 
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        on_scale_bar_changed: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__(master, style="Viewer.TFrame")
+        self._on_scale_bar_changed = on_scale_bar_changed
         self._image: Image.Image | None = None
         self._photo: ImageTk.PhotoImage | None = None
         self._image_item: int | None = None
@@ -208,39 +253,64 @@ class ImageViewer(ttk.Frame):
         self._offset_y = 0.0
         self._fit_mode = True
         self._drag_origin: tuple[int, int, float, float] | None = None
+        self._scale_drag_origin: tuple[str, int, int, float, float] | None = None
+        self._active_scale_key: str | None = None
+        self._scale_bars: dict[str, ScaleBarState] = {}
+        self._overview_scale_enabled = False
+        self._zoom_scale_enabled = False
         self._resize_job: str | None = None
 
-        toolbar = tk.Frame(self, background=COLORS["viewer_toolbar"], height=44)
+        toolbar = tk.Frame(self, background=COLORS["viewer_toolbar"], height=78)
         toolbar.grid(row=0, column=0, sticky="ew")
         toolbar.grid_propagate(False)
+        primary_toolbar = tk.Frame(toolbar, background=COLORS["viewer_toolbar"], height=42)
+        primary_toolbar.pack(fill="x")
+        primary_toolbar.pack_propagate(False)
+        scale_toolbar = tk.Frame(toolbar, background="#111C22", height=36)
+        scale_toolbar.pack(fill="x")
+        scale_toolbar.pack_propagate(False)
         tk.Label(
-            toolbar,
+            primary_toolbar,
             text="10X VIEWER",
             background=COLORS["viewer_toolbar"],
             foreground=COLORS["inverse_muted"],
             font=("Segoe UI Semibold", 9),
         ).pack(side="left", padx=(14, 18))
-        self._toolbar_button(toolbar, "Fit", self.fit_to_window).pack(
+        self._toolbar_button(primary_toolbar, "Fit", self.fit_to_window).pack(
             side="left", padx=(0, 6), pady=7
         )
-        self._toolbar_button(toolbar, "100%", self.actual_size).pack(side="left", pady=7)
-        self._toolbar_button(toolbar, "−", lambda: self._zoom_from_center(1 / 1.15)).pack(
+        self._toolbar_button(primary_toolbar, "100%", self.actual_size).pack(side="left", pady=7)
+        self._toolbar_button(
+            primary_toolbar, "−", lambda: self._zoom_from_center(1 / 1.15)
+        ).pack(
             side="left", padx=(6, 0), pady=7
         )
-        self._toolbar_button(toolbar, "+", lambda: self._zoom_from_center(1.15)).pack(
+        self._toolbar_button(primary_toolbar, "+", lambda: self._zoom_from_center(1.15)).pack(
             side="left", padx=(6, 0), pady=7
         )
+        self.overview_scale_button = self._toolbar_button(
+            scale_toolbar, "10X scale bar", self._toggle_overview_scale
+        )
+        self.overview_scale_button.configure(padx=8)
+        self.overview_scale_button.pack(side="left", padx=(8, 0), pady=4)
+        self.zoom_scale_button = self._toolbar_button(
+            scale_toolbar, "Zoom in scale bar", self._toggle_zoom_scale
+        )
+        self.zoom_scale_button.configure(padx=8)
+        self.zoom_scale_button.pack(side="left", padx=(4, 0), pady=4)
+        self.overview_scale_button.configure(state="disabled")
+        self.zoom_scale_button.configure(state="disabled")
         self.zoom_text = tk.StringVar(value="—")
         self.cursor_text = tk.StringVar(value="x —   y —")
         tk.Label(
-            toolbar,
+            primary_toolbar,
             textvariable=self.cursor_text,
             background=COLORS["viewer_toolbar"],
             foreground=COLORS["inverse_muted"],
             font=("Cascadia Mono", 9),
         ).pack(side="right", padx=(8, 14))
         tk.Label(
-            toolbar,
+            primary_toolbar,
             textvariable=self.zoom_text,
             background=COLORS["viewer_toolbar"],
             foreground=COLORS["inverse"],
@@ -265,6 +335,9 @@ class ImageViewer(ttk.Frame):
         self.canvas.bind("<ButtonPress-1>", self._start_pan)
         self.canvas.bind("<B1-Motion>", self._pan)
         self.canvas.bind("<ButtonRelease-1>", self._end_pan)
+        self.canvas.bind("<Button-3>", self._show_scale_bar_menu)
+        self.canvas.bind("<Button-2>", self._show_scale_bar_menu)
+        self.canvas.bind("<Control-Button-1>", self._show_scale_bar_menu)
         self.canvas.bind("<Motion>", self._cursor_motion)
         self.canvas.bind("<Leave>", lambda _event: self.cursor_text.set("x —   y —"))
         self.canvas.bind("<KeyPress-plus>", lambda _event: self._zoom_from_center(1.15))
@@ -274,6 +347,10 @@ class ImageViewer(ttk.Frame):
         self.canvas.bind("<KeyPress-Right>", lambda _event: self._keyboard_pan(-40, 0))
         self.canvas.bind("<KeyPress-Up>", lambda _event: self._keyboard_pan(0, 40))
         self.canvas.bind("<KeyPress-Down>", lambda _event: self._keyboard_pan(0, -40))
+        self.canvas.bind("<Shift-KeyPress-Left>", lambda _event: self._keyboard_move_scale(-5, 0))
+        self.canvas.bind("<Shift-KeyPress-Right>", lambda _event: self._keyboard_move_scale(5, 0))
+        self.canvas.bind("<Shift-KeyPress-Up>", lambda _event: self._keyboard_move_scale(0, -5))
+        self.canvas.bind("<Shift-KeyPress-Down>", lambda _event: self._keyboard_move_scale(0, 5))
         self._show_empty()
 
     @staticmethod
@@ -294,6 +371,212 @@ class ImageViewer(ttk.Frame):
             font=("Segoe UI", 9),
             cursor="hand2",
         )
+
+    @staticmethod
+    def _set_toggle_button_style(button: tk.Button, active: bool) -> None:
+        """使用稳定的颜色状态表达比例尺开关，不改变按钮尺寸。"""
+
+        button.configure(
+            background=COLORS["accent"] if active else "#24333C",
+            activebackground=COLORS["accent_hover"] if active else "#31434E",
+        )
+
+    def set_scale_bar_control_state(self, has_overview: bool, has_zoom: bool, busy: bool) -> None:
+        """根据应用 workflow 控制比例尺按钮是否可用。"""
+
+        self.overview_scale_button.configure(
+            state="normal" if has_overview and not busy else "disabled"
+        )
+        self.zoom_scale_button.configure(state="normal" if has_zoom and not busy else "disabled")
+
+    def configure_overview_scale_bar(self, pixel_size_um: float) -> None:
+        """为当前 10X 图像建立一个默认 10 µm、白色比例尺。"""
+
+        if self._image is None:
+            return
+        self._scale_bars.clear()
+        self._overview_scale_enabled = False
+        self._zoom_scale_enabled = False
+        state = ScaleBarState(
+            key="overview",
+            scope_name="10X overview",
+            bounds=(0.0, 0.0, float(self._image.width), float(self._image.height)),
+            pixel_size_um=pixel_size_um,
+        )
+        self._scale_bars[state.key] = state
+        self._place_scale_bar(state, "bottom-left")
+        self._active_scale_key = state.key
+        self._update_scale_bar_buttons()
+        self._render_scale_bars()
+
+    def configure_zoom_scale_bars(
+        self,
+        rois: list[ROIResult],
+        pixel_size_um: float,
+    ) -> None:
+        """为每个可见高倍 ROI 建立一个限制在自身矩形内的比例尺。"""
+
+        if self._image is None:
+            return
+        for key in [key for key in self._scale_bars if key.startswith("zoom-")]:
+            del self._scale_bars[key]
+        self._zoom_scale_enabled = False
+        for index, roi in enumerate(rois, start=1):
+            left, top, right, bottom = roi.box
+            bounds = (
+                max(0.0, left),
+                max(0.0, top),
+                min(float(self._image.width), right),
+                min(float(self._image.height), bottom),
+            )
+            if bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
+                continue
+            state = ScaleBarState(
+                key=f"zoom-{index}",
+                scope_name=f"Zoom in ROI {index:02d}",
+                bounds=bounds,
+                pixel_size_um=pixel_size_um,
+            )
+            self._scale_bars[state.key] = state
+            self._place_scale_bar(state, "bottom-left")
+        self._update_scale_bar_buttons()
+        self._render_scale_bars()
+
+    def clear_zoom_scale_bars(self) -> None:
+        """ROI 映射失效时只清除高倍比例尺，保留 10X 比例尺设置。"""
+
+        for key in [key for key in self._scale_bars if key.startswith("zoom-")]:
+            del self._scale_bars[key]
+        self._zoom_scale_enabled = False
+        if self._active_scale_key not in self._scale_bars:
+            self._active_scale_key = "overview" if "overview" in self._scale_bars else None
+        self._update_scale_bar_buttons()
+        self._render_scale_bars()
+
+    def clear_scale_bars(self) -> None:
+        """移除 overview 时清除全部比例尺和交互状态。"""
+
+        self._scale_bars.clear()
+        self._overview_scale_enabled = False
+        self._zoom_scale_enabled = False
+        self._active_scale_key = None
+        self._update_scale_bar_buttons()
+        self.canvas.delete("scale-bar")
+
+    def compose_scale_bars(self, image: Image.Image | None = None) -> Image.Image | None:
+        """按当前交互状态生成全分辨率导出图像。"""
+
+        source = image if image is not None else self._image
+        if source is None:
+            return None
+        return draw_scale_bars(source, [state.overlay() for state in self._visible_scale_bars()])
+
+    def _toggle_overview_scale(self) -> None:
+        if "overview" not in self._scale_bars:
+            return
+        self._overview_scale_enabled = not self._overview_scale_enabled
+        self._active_scale_key = "overview"
+        self._update_scale_bar_buttons()
+        self._render_scale_bars()
+        self._notify_scale_bar_change(
+            "10X scale bar enabled" if self._overview_scale_enabled else "10X scale bar hidden"
+        )
+
+    def _toggle_zoom_scale(self) -> None:
+        zoom_states = [state for key, state in self._scale_bars.items() if key.startswith("zoom-")]
+        if not zoom_states:
+            return
+        fitting = [state for state in zoom_states if self._scale_bar_limits(state) is not None]
+        if not fitting:
+            self._show_scale_bar_warning(
+                "The default 10 µm scale bar does not fit inside any mapped ROI. "
+                "Right-click after choosing a shorter length."
+            )
+            return
+        self._zoom_scale_enabled = not self._zoom_scale_enabled
+        self._active_scale_key = fitting[0].key
+        self._update_scale_bar_buttons()
+        self._render_scale_bars()
+        suffix = "enabled" if self._zoom_scale_enabled else "hidden"
+        skipped = len(zoom_states) - len(fitting)
+        message = f"Zoom in scale bars {suffix}"
+        if self._zoom_scale_enabled and skipped:
+            message += f" · {skipped} ROI(s) too small for 10 µm"
+        self._notify_scale_bar_change(message)
+
+    def _update_scale_bar_buttons(self) -> None:
+        self._set_toggle_button_style(self.overview_scale_button, self._overview_scale_enabled)
+        self._set_toggle_button_style(self.zoom_scale_button, self._zoom_scale_enabled)
+
+    def _visible_scale_bars(self) -> list[ScaleBarState]:
+        states: list[ScaleBarState] = []
+        if self._overview_scale_enabled and "overview" in self._scale_bars:
+            states.append(self._scale_bars["overview"])
+        if self._zoom_scale_enabled:
+            states.extend(
+                state
+                for key, state in self._scale_bars.items()
+                if key.startswith("zoom-") and self._scale_bar_limits(state) is not None
+            )
+        return states
+
+    def _scale_bar_limits(
+        self,
+        state: ScaleBarState,
+        length_um: float | None = None,
+        line_width_px: int | None = None,
+    ) -> tuple[float, float, float, float] | None:
+        """计算中心 X 和 bar Y 的合法范围；放不下时明确返回 None。"""
+
+        if self._image is None:
+            return None
+        length = state.length_um if length_um is None else length_um
+        width = state.line_width_px if line_width_px is None else line_width_px
+        length_px = length / state.pixel_size_um
+        text_width, text_height = scale_bar_label_size(length, self._image.size)
+        half_span = max(length_px, float(text_width)) / 2
+        margin = max(4.0, min(self._image.size) / 400)
+        gap = max(4.0, width + 1.0)
+        left, top, right, bottom = state.bounds
+        min_center = left + margin + half_span
+        max_center = right - margin - half_span
+        min_bar_y = top + margin + text_height + gap
+        max_bar_y = bottom - margin - width / 2
+        if min_center > max_center or min_bar_y > max_bar_y:
+            return None
+        return min_center, max_center, min_bar_y, max_bar_y
+
+    def _clamp_scale_bar(self, state: ScaleBarState) -> bool:
+        limits = self._scale_bar_limits(state)
+        if limits is None:
+            return False
+        min_center, max_center, min_y, max_y = limits
+        state.center_x_px = min(max(state.center_x_px, min_center), max_center)
+        state.bar_y_px = min(max(state.bar_y_px, min_y), max_y)
+        return True
+
+    def _place_scale_bar(self, state: ScaleBarState, preset: str) -> bool:
+        limits = self._scale_bar_limits(state)
+        if limits is None:
+            return False
+        min_center, max_center, min_y, max_y = limits
+        positions = {
+            "bottom-left": (min_center, max_y),
+            "bottom-right": (max_center, max_y),
+            "top-left": (min_center, min_y),
+            "top-right": (max_center, min_y),
+            "center": ((min_center + max_center) / 2, (min_y + max_y) / 2),
+        }
+        state.center_x_px, state.bar_y_px = positions[preset]
+        return True
+
+    def _notify_scale_bar_change(self, message: str) -> None:
+        if self._on_scale_bar_changed is not None:
+            self._on_scale_bar_changed(message)
+
+    def _show_scale_bar_warning(self, message: str) -> None:
+        messagebox.showwarning("Scale bar does not fit", message, parent=self.winfo_toplevel())
+        self._notify_scale_bar_change(message)
 
     def _show_empty(self) -> None:
         self.canvas.delete("all")
@@ -355,6 +638,70 @@ class ImageViewer(ttk.Frame):
             self.canvas.itemconfigure(self._image_item, image=self._photo)
             self.canvas.coords(self._image_item, self._offset_x, self._offset_y)
         self.zoom_text.set(f"{self._scale * 100:.0f}%")
+        self._render_scale_bars()
+
+    def _render_scale_bars(self) -> None:
+        """把比例尺作为 Canvas overlay 绘制；坐标仍从原图像素实时换算。"""
+
+        self.canvas.delete("scale-bar")
+        if self._image is None:
+            return
+        image_left = self._offset_x - self._image.width * self._scale / 2
+        image_top = self._offset_y - self._image.height * self._scale / 2
+        font_px = max(8, round(scale_bar_font_size(self._image.size) * self._scale))
+
+        for state in self._visible_scale_bars():
+            overlay = state.overlay()
+            length_px = overlay.length_px * self._scale
+            center_x = image_left + state.center_x_px * self._scale
+            bar_y = image_top + state.bar_y_px * self._scale
+            left = center_x - length_px / 2
+            right = center_x + length_px / 2
+            width = max(1, round(state.line_width_px * self._scale))
+            color = "#%02x%02x%02x" % SCALE_BAR_COLORS[state.color_name]
+            red, green, blue = SCALE_BAR_COLORS[state.color_name]
+            luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+            contrast = "#000000" if luminance >= 140 else "#FFFFFF"
+            tags = ("scale-bar", f"scale-bar:{state.key}")
+            self.canvas.create_line(
+                left,
+                bar_y,
+                right,
+                bar_y,
+                fill=contrast,
+                width=width + 2,
+                tags=tags,
+            )
+            self.canvas.create_line(
+                left,
+                bar_y,
+                right,
+                bar_y,
+                fill=color,
+                width=width,
+                tags=tags,
+            )
+            gap = max(4, width + 1)
+            self.canvas.create_text(
+                center_x,
+                bar_y - gap,
+                text=format_scale_bar_length(state.length_um),
+                fill=color,
+                font=("Segoe UI Semibold", -font_px),
+                anchor="s",
+                tags=tags,
+            )
+
+    def _scale_key_at(self, canvas_x: int, canvas_y: int) -> str | None:
+        """返回指针下最上层比例尺 key，用于拖动和右键菜单。"""
+
+        for item in reversed(self.canvas.find_overlapping(
+            canvas_x - 4, canvas_y - 4, canvas_x + 4, canvas_y + 4
+        )):
+            for tag in self.canvas.gettags(item):
+                if tag.startswith("scale-bar:"):
+                    return tag.split(":", 1)[1]
+        return None
 
     def _on_resize(self, _event: tk.Event) -> None:
         if self._image is None:
@@ -414,10 +761,33 @@ class ImageViewer(ttk.Frame):
         if self._image is None:
             return
         self.canvas.focus_set()
+        scale_key = self._scale_key_at(event.x, event.y)
+        if scale_key is not None and scale_key in self._scale_bars:
+            state = self._scale_bars[scale_key]
+            self._active_scale_key = scale_key
+            self._scale_drag_origin = (
+                scale_key,
+                event.x,
+                event.y,
+                state.center_x_px,
+                state.bar_y_px,
+            )
+            self.canvas.configure(cursor="hand2")
+            return
         self._drag_origin = (event.x, event.y, self._offset_x, self._offset_y)
         self.canvas.configure(cursor="fleur")
 
     def _pan(self, event: tk.Event) -> None:
+        if self._scale_drag_origin is not None:
+            key, start_x, start_y, center_x, bar_y = self._scale_drag_origin
+            state = self._scale_bars.get(key)
+            if state is None:
+                return
+            state.center_x_px = center_x + (event.x - start_x) / self._scale
+            state.bar_y_px = bar_y + (event.y - start_y) / self._scale
+            self._clamp_scale_bar(state)
+            self._render_scale_bars()
+            return
         if self._drag_origin is None:
             return
         start_x, start_y, image_x, image_y = self._drag_origin
@@ -426,10 +796,16 @@ class ImageViewer(ttk.Frame):
         self._fit_mode = False
         if self._image_item is not None:
             self.canvas.coords(self._image_item, self._offset_x, self._offset_y)
+        self._render_scale_bars()
 
     def _end_pan(self, _event: tk.Event) -> None:
+        moved_scale = self._scale_drag_origin is not None
+        self._scale_drag_origin = None
         self._drag_origin = None
         self.canvas.configure(cursor="crosshair")
+        if moved_scale and self._active_scale_key in self._scale_bars:
+            state = self._scale_bars[self._active_scale_key]
+            self._notify_scale_bar_change(f"{state.scope_name} scale bar position updated")
 
     def _keyboard_pan(self, dx: float, dy: float) -> None:
         """为拖拽平移提供键盘等价操作。"""
@@ -441,12 +817,149 @@ class ImageViewer(ttk.Frame):
         self._fit_mode = False
         if self._image_item is not None:
             self.canvas.coords(self._image_item, self._offset_x, self._offset_y)
+        self._render_scale_bars()
+
+    def _keyboard_move_scale(self, dx_px: float, dy_px: float) -> str:
+        """Shift+方向键移动最后选中的比例尺，作为拖动的键盘替代。"""
+
+        if self._active_scale_key is None:
+            return "break"
+        state = self._scale_bars.get(self._active_scale_key)
+        if state is None or state not in self._visible_scale_bars():
+            return "break"
+        state.center_x_px += dx_px
+        state.bar_y_px += dy_px
+        self._clamp_scale_bar(state)
+        self._render_scale_bars()
+        self._notify_scale_bar_change(f"{state.scope_name} scale bar position updated")
+        return "break"
+
+    def _show_scale_bar_menu(self, event: tk.Event) -> str:
+        """在指针下比例尺打开长度、颜色、宽度和位置预设菜单。"""
+
+        key = self._scale_key_at(event.x, event.y)
+        if key is None or key not in self._scale_bars:
+            return "break"
+        state = self._scale_bars[key]
+        self._active_scale_key = key
+        menu = tk.Menu(self, tearoff=False)
+        menu.add_command(label=state.scope_name, state="disabled")
+        menu.add_separator()
+
+        length_menu = tk.Menu(menu, tearoff=False)
+        length_var = tk.DoubleVar(menu, value=state.length_um)
+        for length_um in SCALE_BAR_LENGTHS_UM:
+            length_menu.add_radiobutton(
+                label=format_scale_bar_length(length_um),
+                variable=length_var,
+                value=length_um,
+                command=lambda value=length_um, target=key: self._set_scale_bar_length(
+                    target, value
+                ),
+            )
+        menu.add_cascade(label="Length", menu=length_menu)
+
+        color_menu = tk.Menu(menu, tearoff=False)
+        color_var = tk.StringVar(menu, value=state.color_name)
+        for color_name in SCALE_BAR_COLORS:
+            color_menu.add_radiobutton(
+                label=color_name,
+                variable=color_var,
+                value=color_name,
+                command=lambda value=color_name, target=key: self._set_scale_bar_color(
+                    target, value
+                ),
+            )
+        menu.add_cascade(label="Color", menu=color_menu)
+
+        width_menu = tk.Menu(menu, tearoff=False)
+        width_var = tk.IntVar(menu, value=state.line_width_px)
+        for width_px in SCALE_BAR_WIDTHS_PX:
+            width_menu.add_radiobutton(
+                label=f"{width_px} px",
+                variable=width_var,
+                value=width_px,
+                command=lambda value=width_px, target=key: self._set_scale_bar_width(
+                    target, value
+                ),
+            )
+        menu.add_cascade(label="Line width", menu=width_menu)
+
+        position_menu = tk.Menu(menu, tearoff=False)
+        for label, preset in (
+            ("Top left", "top-left"),
+            ("Top right", "top-right"),
+            ("Bottom left", "bottom-left"),
+            ("Bottom right", "bottom-right"),
+            ("Center", "center"),
+        ):
+            position_menu.add_command(
+                label=label,
+                command=lambda value=preset, target=key: self._set_scale_bar_position(
+                    target, value
+                ),
+            )
+        menu.add_cascade(label="Position", menu=position_menu)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _set_scale_bar_length(self, key: str, length_um: float) -> None:
+        state = self._scale_bars[key]
+        if self._scale_bar_limits(state, length_um=length_um) is None:
+            self._show_scale_bar_warning(
+                f"{format_scale_bar_length(length_um)} does not fit inside "
+                f"{state.scope_name}. Choose a shorter length."
+            )
+            return
+        state.length_um = length_um
+        self._clamp_scale_bar(state)
+        self._render_scale_bars()
+        self._notify_scale_bar_change(
+            f"{state.scope_name} scale bar length set to {format_scale_bar_length(length_um)}"
+        )
+
+    def _set_scale_bar_color(self, key: str, color_name: str) -> None:
+        state = self._scale_bars[key]
+        state.color_name = color_name
+        self._render_scale_bars()
+        self._notify_scale_bar_change(f"{state.scope_name} scale bar color set to {color_name}")
+
+    def _set_scale_bar_width(self, key: str, width_px: int) -> None:
+        state = self._scale_bars[key]
+        if self._scale_bar_limits(state, line_width_px=width_px) is None:
+            self._show_scale_bar_warning(
+                f"A {width_px} px scale bar does not fit inside {state.scope_name}."
+            )
+            return
+        state.line_width_px = width_px
+        self._clamp_scale_bar(state)
+        self._render_scale_bars()
+        self._notify_scale_bar_change(
+            f"{state.scope_name} scale bar line width set to {width_px} px"
+        )
+
+    def _set_scale_bar_position(self, key: str, preset: str) -> None:
+        state = self._scale_bars[key]
+        if not self._place_scale_bar(state, preset):
+            self._show_scale_bar_warning(
+                f"The current scale bar does not fit inside {state.scope_name}."
+            )
+            return
+        self._render_scale_bars()
+        self._notify_scale_bar_change(f"{state.scope_name} scale bar position updated")
 
     def _cursor_motion(self, event: tk.Event) -> None:
         point = self._image_coordinate(event.x, event.y)
         self.cursor_text.set(
             f"x {point[0]:7.1f}   y {point[1]:7.1f}" if point is not None else "x —   y —"
         )
+        if self._scale_drag_origin is None and self._drag_origin is None:
+            self.canvas.configure(
+                cursor="hand2" if self._scale_key_at(event.x, event.y) else "crosshair"
+            )
 
 
 class ND2ROIMapperApp:
@@ -621,7 +1134,7 @@ class ND2ROIMapperApp:
         self.root.columnconfigure(0, weight=1)
 
         self._build_sidebar(self.sidebar.content)
-        self.viewer = ImageViewer(viewer_shell)
+        self.viewer = ImageViewer(viewer_shell, self._scale_bar_changed)
         self.viewer.pack(fill="both", expand=True)
 
         status = tk.Frame(self.root, background="#DCE3E7", height=28)
@@ -642,7 +1155,10 @@ class ND2ROIMapperApp:
         self.status_label.pack(side="left", fill="x", expand=True)
         tk.Label(
             status,
-            text="Wheel / + −: zoom   Drag / arrow keys: pan",
+            text=(
+                "Wheel / + −: zoom   Drag / arrows: pan   "
+                "Scale bar: drag · right-click · Shift+arrows"
+            ),
             background="#DCE3E7",
             foreground=COLORS["muted"],
             font=("Segoe UI", 8),
@@ -971,6 +1487,13 @@ class ND2ROIMapperApp:
             foreground=color if kind in {"error", "warning"} else COLORS["muted"]
         )
 
+    def _scale_bar_changed(self, message: str) -> None:
+        """比例尺变更只使上次导出失效，不重新计算任何 ROI 几何。"""
+
+        self.last_export_path = None
+        self._set_status(message + " · export again to save the change", "neutral")
+        self._refresh_state()
+
     def _refresh_state(self) -> None:
         has_low = self.low_metadata is not None and self.low_image is not None
         has_high = bool(self.high_items)
@@ -996,6 +1519,7 @@ class ND2ROIMapperApp:
         self.upright_radio.configure(state=radio_state)
         self.inverted_radio.configure(state=radio_state)
         self.format_combo.configure(state="readonly" if not self._busy else "disabled")
+        self.viewer.set_scale_bar_control_state(has_low, has_map, self._busy)
 
         completed = [has_low, has_high, has_map, self.last_export_path is not None]
         current = 0 if not has_low else 1 if not has_high else 2 if not has_map else 3
@@ -1124,6 +1648,7 @@ class ND2ROIMapperApp:
             )
             self._invalidate_mapping(reset_to_base=False)
             self.viewer.set_image(self.low_image)
+            self.viewer.configure_overview_scale_bar(self.low_metadata.pixel_size_x_um)
             self._set_status(f"10X overview ready · {path.name}", "success")
 
         self._run_background("Reading 10X metadata…", work, accept)
@@ -1143,6 +1668,7 @@ class ND2ROIMapperApp:
         self.low_state.configure(text="Click or drop one .nd2 file", style="Muted.TLabel")
         self._rebuild_high_tree()
         self._invalidate_mapping(reset_to_base=False)
+        self.viewer.clear_scale_bars()
         self.viewer.set_image(None)
         self._set_status("10X overview removed · dependent ROI list cleared", "neutral")
         self._refresh_state()
@@ -1241,6 +1767,7 @@ class ND2ROIMapperApp:
         self.roi_results = []
         self.annotated_image = None
         self.last_export_path = None
+        self.viewer.clear_zoom_scale_bars()
         if reset_to_base and self.low_image is not None:
             self.viewer.set_image(self.low_image)
         self._refresh_state()
@@ -1281,6 +1808,10 @@ class ND2ROIMapperApp:
         def accept(result: tuple[Image.Image, list[ROIResult], list[str]]) -> None:
             self.annotated_image, self.roi_results, warnings = result
             self.viewer.set_image(self.annotated_image)
+            self.viewer.configure_zoom_scale_bars(
+                self.roi_results,
+                low.pixel_size_x_um,
+            )
             if warnings:
                 self._set_status("Preview ready with warning · " + "; ".join(warnings), "warning")
             else:
@@ -1305,7 +1836,10 @@ class ND2ROIMapperApp:
         )
         if not output:
             return
-        image = self.annotated_image.copy()
+        composed = self.viewer.compose_scale_bars(self.annotated_image)
+        if composed is None:
+            return
+        image = composed
         output_path = Path(output)
 
         def work(report: Callable[[str], None]) -> Path:

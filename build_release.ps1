@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.0.0',
+    [string]$Version = '1.1.0',
 
     [ValidatePattern('^\d+\.\d+$')]
     [string]$PythonVersion = '3.13'
@@ -33,27 +33,6 @@ function Invoke-NativeCommand {
     }
 }
 
-function Find-InnoCompiler {
-    $command = Get-Command 'ISCC.exe' -ErrorAction SilentlyContinue
-    if ($null -ne $command) {
-        return $command.Source
-    }
-
-    $candidates = @(
-        (Join-Path $projectRoot '.tools\inno-setup-7\ISCC.exe'),
-        (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 7\ISCC.exe'),
-        (Join-Path $env:ProgramFiles 'Inno Setup 7\ISCC.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
-        (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe')
-    )
-    foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate) {
-            return $candidate
-        }
-    }
-    throw 'Inno Setup 7 was not found. Install JRSoftware.InnoSetup.7 before building.'
-}
-
 $buildVenv = Get-SafeProjectPath '.build-venv'
 $buildDir = Get-SafeProjectPath 'build'
 $distDir = Get-SafeProjectPath 'dist'
@@ -79,8 +58,12 @@ Invoke-NativeCommand -FilePath $buildPython -Arguments @(
     '-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', '-r',
     (Join-Path $projectRoot 'requirements-build.txt')
 )
+Invoke-NativeCommand -FilePath $buildPython -Arguments @(
+    '-m', 'unittest', 'discover', '-s', (Join-Path $projectRoot 'tests'), '-v'
+)
 
 New-Item -ItemType Directory -Path $stagingDir | Out-Null
+$env:ND2_ROI_MAPPER_VERSION = $Version
 $versionParts = $Version.Split('.')
 $versionTemplate = Get-Content -Raw -Encoding UTF8 -LiteralPath (
     Join-Path $projectRoot 'packaging\windows_version_info.template'
@@ -112,26 +95,14 @@ Copy-Item -LiteralPath $distApp -Destination $portableRoot -Recurse
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $portableRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $portableRoot
 
-$portableZip = Join-Path $releaseDir "ND2-ROI-Mapper-Portable-v$Version.zip"
+$portableZip = Join-Path $releaseDir "ND2-ROI-Mapper-Windows-Portable-v$Version.zip"
 Compress-Archive -LiteralPath $portableRoot -DestinationPath $portableZip `
     -CompressionLevel Optimal
 
-$innoCompiler = Find-InnoCompiler
-Invoke-NativeCommand -FilePath $innoCompiler -Arguments @(
-    "/DMyAppVersion=$Version",
-    "/DMySourceDir=$portableRoot",
-    "/DMyOutputDir=$releaseDir",
-    (Join-Path $projectRoot 'installer\nd2_roi_mapper.iss')
-)
-
-$setupExe = Join-Path $releaseDir "ND2-ROI-Mapper-Setup-v$Version.exe"
-foreach ($artifact in @($portableZip, $setupExe)) {
-    if (-not (Test-Path -LiteralPath $artifact)) {
-        throw "Release artifact is missing: $artifact"
-    }
+if (-not (Test-Path -LiteralPath $portableZip)) {
+    throw "Release artifact is missing: $portableZip"
 }
 
 Write-Host ''
 Write-Host 'Release artifacts created:' -ForegroundColor Green
-Write-Host $setupExe
 Write-Host $portableZip

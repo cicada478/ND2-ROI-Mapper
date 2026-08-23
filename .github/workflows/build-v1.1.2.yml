@@ -1,16 +1,16 @@
-name: Build v1.1.1 release artifacts
+name: Build v1.1.2 release artifacts
 
 on:
   push:
     branches:
-      - codex/scale-labels-quality-v1.1.1
+      - codex/fixed-labels-v1.1.2
   workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
-  APP_VERSION: 1.1.1
+  APP_VERSION: 1.1.2
   PYTHON_VERSION: "3.13"
 
 jobs:
@@ -34,8 +34,8 @@ jobs:
           if ($process.ExitCode -ne 0) { throw 'Packaged CLI smoke test failed.' }
       - uses: actions/upload-artifact@v7
         with:
-          name: ND2-ROI-Mapper-Windows-Portable-v1.1.1
-          path: release/ND2-ROI-Mapper-Windows-Portable-v1.1.1.zip
+          name: ND2-ROI-Mapper-Windows-Portable-v1.1.2
+          path: release/ND2-ROI-Mapper-Windows-Portable-v1.1.2.zip
           if-no-files-found: error
           compression-level: 0
 
@@ -62,7 +62,7 @@ jobs:
         run: bash ./build_macos_release.sh "$APP_VERSION" "${{ matrix.arch_label }}"
       - uses: actions/upload-artifact@v7
         with:
-          name: ND2-ROI-Mapper-macOS-${{ matrix.arch_label }}-v1.1.1
-          path: release/ND2-ROI-Mapper-macOS-${{ matrix.arch_label }}-v1.1.1.zip
+          name: ND2-ROI-Mapper-macOS-${{ matrix.arch_label }}-v1.1.2
+          path: release/ND2-ROI-Mapper-macOS-${{ matrix.arch_label }}-v1.1.2.zip
           if-no-files-found: error
           compression-level: 0

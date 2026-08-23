@@ -9,7 +9,7 @@ from __future__ import annotations
 import queue
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -23,21 +23,17 @@ from nd2_roi_locator import (
     MICROSCOPE_SIGNS,
     MetadataError,
     ND2Metadata,
-    ROILabelPlacement,
     ROIResult,
     ScaleBarOverlay,
     _default_output,
     _print_metadata,
     _print_result,
     calculate_roi_position,
-    draw_roi_geometry,
-    draw_roi_labels,
+    draw_rois,
     draw_scale_bars,
     format_scale_bar_length,
-    layout_roi_labels,
     read_nd2_image,
     read_nd2_metadata,
-    roi_label_arrow_points,
     save_export_image,
     scale_bar_font_size,
     scale_bar_label_size,
@@ -139,28 +135,6 @@ class ScaleBarState:
             line_width_px=self.line_width_px,
             show_text=self.show_text,
             font_size_px=self.font_size_px,
-        )
-
-
-@dataclass
-class ROILabelState:
-    """Viewer 中可拖动的 ROI 标签；位置只属于显示层。"""
-
-    key: str
-    index: int
-    placement: ROILabelPlacement
-    text_x: float
-    text_y: float
-    automatic_x: float
-    automatic_y: float
-    manually_moved: bool = False
-
-    def export_placement(self) -> ROILabelPlacement:
-        return replace(
-            self.placement,
-            text_x=self.text_x,
-            text_y=self.text_y,
-            use_arrow=self.placement.use_arrow or self.manually_moved,
         )
 
 
@@ -300,11 +274,8 @@ class ImageViewer(ttk.Frame):
         self._fit_mode = True
         self._drag_origin: tuple[int, int, float, float] | None = None
         self._scale_drag_origin: tuple[str, int, int, float, float] | None = None
-        self._label_drag_origin: tuple[str, int, int, float, float] | None = None
         self._active_scale_key: str | None = None
-        self._active_label_key: str | None = None
         self._scale_bars: dict[str, ScaleBarState] = {}
-        self._roi_labels: dict[str, ROILabelState] = {}
         self._overview_scale_enabled = False
         self._zoom_scale_enabled = False
         self._resize_job: str | None = None
@@ -396,10 +367,10 @@ class ImageViewer(ttk.Frame):
         self.canvas.bind("<KeyPress-Right>", lambda _event: self._keyboard_pan(-40, 0))
         self.canvas.bind("<KeyPress-Up>", lambda _event: self._keyboard_pan(0, 40))
         self.canvas.bind("<KeyPress-Down>", lambda _event: self._keyboard_pan(0, -40))
-        self.canvas.bind("<Shift-KeyPress-Left>", lambda _event: self._keyboard_move_active(-5, 0))
-        self.canvas.bind("<Shift-KeyPress-Right>", lambda _event: self._keyboard_move_active(5, 0))
-        self.canvas.bind("<Shift-KeyPress-Up>", lambda _event: self._keyboard_move_active(0, -5))
-        self.canvas.bind("<Shift-KeyPress-Down>", lambda _event: self._keyboard_move_active(0, 5))
+        self.canvas.bind("<Shift-KeyPress-Left>", lambda _event: self._keyboard_move_scale(-5, 0))
+        self.canvas.bind("<Shift-KeyPress-Right>", lambda _event: self._keyboard_move_scale(5, 0))
+        self.canvas.bind("<Shift-KeyPress-Up>", lambda _event: self._keyboard_move_scale(0, -5))
+        self.canvas.bind("<Shift-KeyPress-Down>", lambda _event: self._keyboard_move_scale(0, 5))
         self._show_empty()
 
     @staticmethod
@@ -491,32 +462,6 @@ class ImageViewer(ttk.Frame):
         self._update_scale_bar_buttons()
         self._render_overlays()
 
-    def configure_roi_labels(self, placements: list[ROILabelPlacement]) -> None:
-        """建立可拖动标签；初始位置沿用核心绘制层的自动避让结果。"""
-
-        self._roi_labels.clear()
-        for index, placement in enumerate(placements, start=1):
-            state = ROILabelState(
-                key=f"roi-label-{index}",
-                index=index,
-                placement=placement,
-                text_x=placement.text_x,
-                text_y=placement.text_y,
-                automatic_x=placement.text_x,
-                automatic_y=placement.text_y,
-            )
-            self._roi_labels[state.key] = state
-            self._clamp_roi_label(state)
-        self._active_label_key = None
-        self._render_overlays()
-
-    def clear_roi_labels(self) -> None:
-        """ROI mapping 失效时清除标签显示层。"""
-
-        self._roi_labels.clear()
-        self._active_label_key = None
-        self.canvas.delete("roi-label")
-
     def clear_zoom_scale_bars(self) -> None:
         """ROI 映射失效时只清除高倍比例尺，保留 10X 比例尺设置。"""
 
@@ -535,24 +480,19 @@ class ImageViewer(ttk.Frame):
         self._overview_scale_enabled = False
         self._zoom_scale_enabled = False
         self._active_scale_key = None
-        self.clear_roi_labels()
         self._update_scale_bar_buttons()
         self.canvas.delete("scale-bar")
 
     def compose_annotations(self, image: Image.Image | None = None) -> Image.Image | None:
-        """按当前交互状态生成包含 ROI 标签与比例尺的全分辨率图像。"""
+        """把当前比例尺叠加到已固定绘制 ROI 标签的全分辨率图像。"""
 
         source = image if image is not None else self._image
         if source is None:
             return None
-        labeled = draw_roi_labels(
-            source,
-            [state.export_placement() for state in self._roi_labels.values()],
-        )
-        return draw_scale_bars(labeled, [state.overlay() for state in self._visible_scale_bars()])
+        return draw_scale_bars(source, [state.overlay() for state in self._visible_scale_bars()])
 
     def compose_scale_bars(self, image: Image.Image | None = None) -> Image.Image | None:
-        """兼容旧调用；现在会同时合成 ROI 标签和比例尺。"""
+        """兼容旧调用；按当前状态合成比例尺。"""
 
         return self.compose_annotations(image)
 
@@ -561,7 +501,6 @@ class ImageViewer(ttk.Frame):
             return
         self._overview_scale_enabled = not self._overview_scale_enabled
         self._active_scale_key = "overview"
-        self._active_label_key = None
         self._update_scale_bar_buttons()
         self._render_overlays()
         self._notify_scale_bar_change(
@@ -581,7 +520,6 @@ class ImageViewer(ttk.Frame):
             return
         self._zoom_scale_enabled = not self._zoom_scale_enabled
         self._active_scale_key = fitting[0].key
-        self._active_label_key = None
         self._update_scale_bar_buttons()
         self._render_overlays()
         suffix = "enabled" if self._zoom_scale_enabled else "hidden"
@@ -667,75 +605,6 @@ class ImageViewer(ttk.Frame):
         state.center_x_px, state.bar_y_px = positions[preset]
         return True
 
-    def _roi_label_limits(self, state: ROILabelState) -> tuple[float, float, float, float]:
-        """限制标签中心在对应高倍 FOV 中心附近，并保持文字位于 10X 图内。"""
-
-        assert self._image is not None
-        placement = state.placement
-        roi = placement.roi
-        margin = max(6.0, min(self._image.size) / 350)
-        half_text_width = placement.text_width / 2
-        half_text_height = placement.text_height / 2
-        min_center_x = max(half_text_width + margin, roi.center_x_px - roi.width_px)
-        max_center_x = min(
-            self._image.width - half_text_width - margin,
-            roi.center_x_px + roi.width_px,
-        )
-        min_center_y = max(half_text_height + margin, roi.center_y_px - roi.height_px)
-        max_center_y = min(
-            self._image.height - half_text_height - margin,
-            roi.center_y_px + roi.height_px,
-        )
-        if min_center_x > max_center_x:
-            min_center_x = max_center_x = min(
-                max(half_text_width, roi.center_x_px), self._image.width - half_text_width
-            )
-        if min_center_y > max_center_y:
-            min_center_y = max_center_y = min(
-                max(half_text_height, roi.center_y_px), self._image.height - half_text_height
-            )
-        return (
-            min_center_x - half_text_width,
-            max_center_x - half_text_width,
-            min_center_y - half_text_height,
-            max_center_y - half_text_height,
-        )
-
-    def _clamp_roi_label(self, state: ROILabelState) -> None:
-        if self._image is None:
-            return
-        min_x, max_x, min_y, max_y = self._roi_label_limits(state)
-        state.text_x = min(max(state.text_x, min_x), max_x)
-        state.text_y = min(max(state.text_y, min_y), max_y)
-
-    def _place_roi_label(self, state: ROILabelState, preset: str) -> None:
-        """提供无需拖动即可复位或定位标签的单指针替代操作。"""
-
-        roi = state.placement.roi
-        gap = max(12.0, min(roi.width_px, roi.height_px) / 10)
-        positions = {
-            "automatic": (state.automatic_x, state.automatic_y),
-            "above": (
-                roi.center_x_px - state.placement.text_width / 2,
-                roi.box[1] - state.placement.text_height - gap,
-            ),
-            "below": (
-                roi.center_x_px - state.placement.text_width / 2,
-                roi.box[3] + gap,
-            ),
-            "left": (
-                roi.box[0] - state.placement.text_width - gap,
-                roi.center_y_px - state.placement.text_height / 2,
-            ),
-            "right": (
-                roi.box[2] + gap,
-                roi.center_y_px - state.placement.text_height / 2,
-            ),
-        }
-        state.text_x, state.text_y = positions[preset]
-        state.manually_moved = preset != "automatic"
-        self._clamp_roi_label(state)
-
     def _notify_scale_bar_change(self, message: str) -> None:
         if self._on_scale_bar_changed is not None:
             self._on_scale_bar_changed(message)
@@ -807,64 +676,9 @@ class ImageViewer(ttk.Frame):
         self._render_overlays()
 
     def _render_overlays(self) -> None:
-        """按标签、比例尺的固定层级重绘所有 Viewer overlay。"""
+        """重绘比例尺；ROI 标签已经固定绘制在全分辨率预览中。"""
 
-        self._render_roi_labels()
         self._render_scale_bars()
-
-    def _render_roi_labels(self) -> None:
-        """把可拖动标签绘制为 Canvas overlay，不改变底层 ROI 像素。"""
-
-        self.canvas.delete("roi-label")
-        if self._image is None:
-            return
-        image_left = self._offset_x - self._image.width * self._scale / 2
-        image_top = self._offset_y - self._image.height * self._scale / 2
-        font_px = max(8, round(max(16, min(self._image.size) / 65) * self._scale))
-        line_width = max(1, round(max(3, min(self._image.size) / 350) * self._scale))
-
-        for state in self._roi_labels.values():
-            placement = state.export_placement()
-            left, top, right, bottom = placement.box
-            canvas_box = (
-                image_left + left * self._scale,
-                image_top + top * self._scale,
-                image_left + right * self._scale,
-                image_top + bottom * self._scale,
-            )
-            color = "#%02x%02x%02x" % placement.color
-            tags = ("roi-label", f"roi-label:{state.key}")
-            if placement.use_arrow:
-                start_x, start_y, end_x, end_y = roi_label_arrow_points(
-                    placement.box, placement.roi
-                )
-                self.canvas.create_line(
-                    image_left + start_x * self._scale,
-                    image_top + start_y * self._scale,
-                    image_left + end_x * self._scale,
-                    image_top + end_y * self._scale,
-                    fill=color,
-                    width=line_width,
-                    arrow=tk.LAST,
-                    tags=tags,
-                )
-            self.canvas.create_rectangle(
-                canvas_box,
-                fill="#000000",
-                outline=color if state.key == self._active_label_key else "#000000",
-                width=1,
-                tags=tags,
-            )
-            self.canvas.create_text(
-                image_left + placement.text_x * self._scale,
-                image_top + placement.text_y * self._scale,
-                text=placement.label,
-                fill=color,
-                font=("Segoe UI Semibold", -font_px),
-                anchor="nw",
-                justify="left",
-                tags=tags,
-            )
 
     def _render_scale_bars(self) -> None:
         """把比例尺作为 Canvas overlay 绘制；坐标仍从原图像素实时换算。"""
@@ -935,18 +749,6 @@ class ImageViewer(ttk.Frame):
                     return tag.split(":", 1)[1]
         return None
 
-    def _label_key_at(self, canvas_x: int, canvas_y: int) -> str | None:
-        """返回指针下最上层 ROI 标签 key。"""
-
-        for item in reversed(
-            self.canvas.find_overlapping(
-                canvas_x - 4, canvas_y - 4, canvas_x + 4, canvas_y + 4
-            )
-        ):
-            for tag in self.canvas.gettags(item):
-                if tag.startswith("roi-label:"):
-                    return tag.split(":", 1)[1]
-        return None
 
     def _on_resize(self, _event: tk.Event) -> None:
         if self._image is None:
@@ -1010,7 +812,6 @@ class ImageViewer(ttk.Frame):
         if scale_key is not None and scale_key in self._scale_bars:
             state = self._scale_bars[scale_key]
             self._active_scale_key = scale_key
-            self._active_label_key = None
             self._scale_drag_origin = (
                 scale_key,
                 event.x,
@@ -1018,21 +819,6 @@ class ImageViewer(ttk.Frame):
                 state.center_x_px,
                 state.bar_y_px,
             )
-            self.canvas.configure(cursor="hand2")
-            return
-        label_key = self._label_key_at(event.x, event.y)
-        if label_key is not None and label_key in self._roi_labels:
-            state = self._roi_labels[label_key]
-            self._active_label_key = label_key
-            self._active_scale_key = None
-            self._label_drag_origin = (
-                label_key,
-                event.x,
-                event.y,
-                state.text_x,
-                state.text_y,
-            )
-            self._render_overlays()
             self.canvas.configure(cursor="hand2")
             return
         self._drag_origin = (event.x, event.y, self._offset_x, self._offset_y)
@@ -1049,17 +835,6 @@ class ImageViewer(ttk.Frame):
             self._clamp_scale_bar(state)
             self._render_overlays()
             return
-        if self._label_drag_origin is not None:
-            key, start_x, start_y, text_x, text_y = self._label_drag_origin
-            state = self._roi_labels.get(key)
-            if state is None:
-                return
-            state.text_x = text_x + (event.x - start_x) / self._scale
-            state.text_y = text_y + (event.y - start_y) / self._scale
-            state.manually_moved = True
-            self._clamp_roi_label(state)
-            self._render_overlays()
-            return
         if self._drag_origin is None:
             return
         start_x, start_y, image_x, image_y = self._drag_origin
@@ -1072,17 +847,12 @@ class ImageViewer(ttk.Frame):
 
     def _end_pan(self, _event: tk.Event) -> None:
         moved_scale = self._scale_drag_origin is not None
-        moved_label = self._label_drag_origin is not None
         self._scale_drag_origin = None
-        self._label_drag_origin = None
         self._drag_origin = None
         self.canvas.configure(cursor="crosshair")
         if moved_scale and self._active_scale_key in self._scale_bars:
             state = self._scale_bars[self._active_scale_key]
             self._notify_scale_bar_change(f"{state.scope_name} scale bar position updated")
-        if moved_label and self._active_label_key in self._roi_labels:
-            state = self._roi_labels[self._active_label_key]
-            self._notify_scale_bar_change(f"ROI {state.index:02d} label position updated")
 
     def _keyboard_pan(self, dx: float, dy: float) -> None:
         """为拖拽平移提供键盘等价操作。"""
@@ -1096,21 +866,9 @@ class ImageViewer(ttk.Frame):
             self.canvas.coords(self._image_item, self._offset_x, self._offset_y)
         self._render_overlays()
 
-    def _keyboard_move_active(self, dx_px: float, dy_px: float) -> str:
-        """Shift+方向键移动最后选中的比例尺或 ROI 标签。"""
+    def _keyboard_move_scale(self, dx_px: float, dy_px: float) -> str:
+        """Shift+方向键移动最后选中的比例尺。"""
 
-        if self._active_label_key is not None:
-            label_state = self._roi_labels.get(self._active_label_key)
-            if label_state is not None:
-                label_state.text_x += dx_px
-                label_state.text_y += dy_px
-                label_state.manually_moved = True
-                self._clamp_roi_label(label_state)
-                self._render_overlays()
-                self._notify_scale_bar_change(
-                    f"ROI {label_state.index:02d} label position updated"
-                )
-                return "break"
         if self._active_scale_key is not None:
             scale_state = self._scale_bars.get(self._active_scale_key)
             if scale_state is not None and scale_state in self._visible_scale_bars():
@@ -1128,10 +886,9 @@ class ImageViewer(ttk.Frame):
 
         key = self._scale_key_at(event.x, event.y)
         if key is None or key not in self._scale_bars:
-            return self._show_roi_label_menu(event)
+            return "break"
         state = self._scale_bars[key]
         self._active_scale_key = key
-        self._active_label_key = None
         menu = tk.Menu(self, tearoff=False)
         menu.add_command(label=state.scope_name, state="disabled")
         menu.add_separator()
@@ -1220,37 +977,6 @@ class ImageViewer(ttk.Frame):
             menu.grab_release()
         return "break"
 
-    def _show_roi_label_menu(self, event: tk.Event) -> str:
-        """为 ROI 标签提供复位和离散位置选项，避免只能依赖拖动。"""
-
-        key = self._label_key_at(event.x, event.y)
-        if key is None or key not in self._roi_labels:
-            return "break"
-        state = self._roi_labels[key]
-        self._active_label_key = key
-        self._active_scale_key = None
-        menu = tk.Menu(self, tearoff=False)
-        menu.add_command(label=f"ROI {state.index:02d} label", state="disabled")
-        menu.add_separator()
-        for label, preset in (
-            ("Reset automatic position", "automatic"),
-            ("Place above ROI", "above"),
-            ("Place below ROI", "below"),
-            ("Place left of ROI", "left"),
-            ("Place right of ROI", "right"),
-        ):
-            menu.add_command(
-                label=label,
-                command=lambda value=preset, target=key: self._set_roi_label_position(
-                    target, value
-                ),
-            )
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
-        return "break"
-
     def _set_scale_bar_length(self, key: str, length_um: float) -> None:
         state = self._scale_bars[key]
         if self._scale_bar_limits(state, length_um=length_um) is None:
@@ -1325,12 +1051,6 @@ class ImageViewer(ttk.Frame):
         label = "Auto" if font_size_px is None else f"{font_size_px} px"
         self._notify_scale_bar_change(f"{state.scope_name} text size set to {label}")
 
-    def _set_roi_label_position(self, key: str, preset: str) -> None:
-        state = self._roi_labels[key]
-        self._place_roi_label(state, preset)
-        self._render_overlays()
-        self._notify_scale_bar_change(f"ROI {state.index:02d} label position updated")
-
     def _cursor_motion(self, event: tk.Event) -> None:
         point = self._image_coordinate(event.x, event.y)
         self.cursor_text.set(
@@ -1338,16 +1058,10 @@ class ImageViewer(ttk.Frame):
         )
         if (
             self._scale_drag_origin is None
-            and self._label_drag_origin is None
             and self._drag_origin is None
         ):
             self.canvas.configure(
-                cursor=(
-                    "hand2"
-                    if self._scale_key_at(event.x, event.y)
-                    or self._label_key_at(event.x, event.y)
-                    else "crosshair"
-                )
+                cursor="hand2" if self._scale_key_at(event.x, event.y) else "crosshair"
             )
 
 
@@ -1548,7 +1262,7 @@ class ND2ROIMapperApp:
             status,
             text=(
                 "Wheel / + −: zoom   Drag / arrows: pan   "
-                "Labels / scale bars: drag · right-click · Shift+arrows"
+                "Scale bar: drag · right-click · Shift+arrows"
             ),
             background="#DCE3E7",
             foreground=COLORS["muted"],
@@ -2192,7 +1906,6 @@ class ND2ROIMapperApp:
         self.annotated_image = None
         self.last_export_path = None
         self.viewer.clear_zoom_scale_bars()
-        self.viewer.clear_roi_labels()
         if reset_to_base and self.low_image is not None:
             self.viewer.set_image(self.low_image)
         self._refresh_state()
@@ -2207,9 +1920,7 @@ class ND2ROIMapperApp:
         microscope = self.microscope_var.get()
         x_sign, y_sign = MICROSCOPE_SIGNS[microscope]
 
-        def work(
-            report: Callable[[str], None],
-        ) -> tuple[Image.Image, list[ROIResult], list[str], list[ROILabelPlacement]]:
+        def work(report: Callable[[str], None]) -> tuple[Image.Image, list[ROIResult], list[str]]:
             drawing_items: list[tuple[ROIResult, str, tuple[int, int, int]]] = []
             results: list[ROIResult] = []
             warnings: list[str] = []
@@ -2230,16 +1941,11 @@ class ND2ROIMapperApp:
                 if left < 0 or top < 0 or right > low.width_px or bottom > low.height_px:
                     warnings.append(f"ROI {index:02d} extends beyond the 10X image")
             report("Rendering annotated preview…")
-            geometry = draw_roi_geometry(base, drawing_items)
-            placements = layout_roi_labels(base, drawing_items)
-            return geometry, results, warnings, placements
+            return draw_rois(base, drawing_items), results, warnings
 
-        def accept(
-            result: tuple[Image.Image, list[ROIResult], list[str], list[ROILabelPlacement]],
-        ) -> None:
-            self.annotated_image, self.roi_results, warnings, placements = result
+        def accept(result: tuple[Image.Image, list[ROIResult], list[str]]) -> None:
+            self.annotated_image, self.roi_results, warnings = result
             self.viewer.set_image(self.annotated_image)
-            self.viewer.configure_roi_labels(placements)
             self.viewer.configure_zoom_scale_bars(
                 self.roi_results,
                 low.pixel_size_x_um,

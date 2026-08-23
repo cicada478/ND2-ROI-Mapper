@@ -24,7 +24,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 
 
 # ============================================================================

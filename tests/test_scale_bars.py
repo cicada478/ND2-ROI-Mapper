@@ -18,7 +18,7 @@ from nd2_roi_locator import (
     scale_bar_label_size,
     save_export_image,
 )
-from nd2_roi_ui import ImageViewer, ROILabelState, ScaleBarState
+from nd2_roi_ui import ImageViewer, ScaleBarState
 
 
 class ScaleBarOverlayTests(unittest.TestCase):
@@ -113,7 +113,7 @@ class ScaleBarBoundsTests(unittest.TestCase):
         self.assertEqual((state.center_x_px, state.bar_y_px), (limits[1], limits[3]))
 
 
-class ROILabelLayerTests(unittest.TestCase):
+class FixedROILabelTests(unittest.TestCase):
     def setUp(self) -> None:
         self.image = Image.new("RGB", (800, 500), (12, 18, 24))
         self.roi = ROIResult(
@@ -136,27 +136,6 @@ class ROILabelLayerTests(unittest.TestCase):
         split = draw_roi_labels(geometry, placements)
         combined = draw_rois(self.image, self.items)
         self.assertEqual(split.tobytes(), combined.tobytes())
-
-    def test_label_drag_limits_stay_near_roi_center_and_inside_image(self) -> None:
-        placement = layout_roi_labels(self.image, self.items)[0]
-        state = ROILabelState(
-            key="roi-label-1",
-            index=1,
-            placement=placement,
-            text_x=-10_000,
-            text_y=10_000,
-            automatic_x=placement.text_x,
-            automatic_y=placement.text_y,
-        )
-        viewer = ImageViewer.__new__(ImageViewer)
-        viewer._image = self.image
-        viewer._clamp_roi_label(state)
-        min_x, max_x, min_y, max_y = viewer._roi_label_limits(state)
-        self.assertGreaterEqual(state.text_x, min_x)
-        self.assertLessEqual(state.text_x, max_x)
-        self.assertGreaterEqual(state.text_y, min_y)
-        self.assertLessEqual(state.text_y, max_y)
-
 
 class ExportQualityTests(unittest.TestCase):
     def test_jpeg_quality_changes_encoded_file_size(self) -> None:

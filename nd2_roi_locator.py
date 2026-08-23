@@ -24,7 +24,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 
 # ============================================================================
@@ -152,6 +152,8 @@ class ScaleBarOverlay:
     pixel_size_um: float = 1.0
     color: tuple[int, int, int] = (255, 255, 255)
     line_width_px: int = 4
+    show_text: bool = True
+    font_size_px: int | None = None
 
     @property
     def length_px(self) -> float:
@@ -162,6 +164,31 @@ class ScaleBarOverlay:
         if self.length_um <= 0:
             raise ValueError("Scale bar length must be greater than zero.")
         return self.length_um / self.pixel_size_um
+
+
+@dataclass(frozen=True)
+class ROILabelPlacement:
+    """ROI 文字标签的显示层位置；不会改变对应 ROI 的科学坐标。"""
+
+    roi: ROIResult
+    label: str
+    color: tuple[int, int, int]
+    text_x: float
+    text_y: float
+    text_width: float
+    text_height: float
+    use_arrow: bool
+
+    @property
+    def box(self) -> tuple[float, float, float, float]:
+        """返回包含黑色背景边距的标签矩形。"""
+
+        return (
+            self.text_x - 4,
+            self.text_y - 4,
+            self.text_x + self.text_width + 5,
+            self.text_y + self.text_height + 5,
+        )
 
 
 class MetadataError(RuntimeError):
@@ -658,10 +685,17 @@ def format_scale_bar_length(length_um: float) -> str:
     return f"{length_um:g} µm"
 
 
-def scale_bar_label_size(length_um: float, image_size: tuple[int, int]) -> tuple[int, int]:
+def scale_bar_label_size(
+    length_um: float,
+    image_size: tuple[int, int],
+    font_size_px: int | None = None,
+    show_text: bool = True,
+) -> tuple[int, int]:
     """返回与导出绘制一致的比例尺标签宽高，供 Viewer 做边界约束。"""
 
-    font = _font(scale_bar_font_size(image_size))
+    if not show_text:
+        return 0, 0
+    font = _font(font_size_px or scale_bar_font_size(image_size))
     label = format_scale_bar_length(length_um)
     probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
     box = probe.textbbox((0, 0), label, font=font, stroke_width=1)
@@ -678,8 +712,6 @@ def draw_scale_bars(image: Image.Image, scale_bars: Iterable[ScaleBarOverlay]) -
 
     output = image.copy().convert("RGB")
     draw = ImageDraw.Draw(output)
-    font = _font(scale_bar_font_size(output.size))
-
     for scale_bar in scale_bars:
         length_px = scale_bar.length_px
         width = max(1, int(scale_bar.line_width_px))
@@ -687,28 +719,29 @@ def draw_scale_bars(image: Image.Image, scale_bars: Iterable[ScaleBarOverlay]) -
         bar_y = float(scale_bar.bar_y_px)
         left = center_x - length_px / 2
         right = center_x + length_px / 2
-        label = format_scale_bar_length(scale_bar.length_um)
-        text_box = draw.textbbox((0, 0), label, font=font, stroke_width=1)
-        text_width = text_box[2] - text_box[0]
-        text_height = text_box[3] - text_box[1]
-        gap = max(4, width + 1)
-        text_x = center_x - text_width / 2
-        text_y = bar_y - gap - text_height
-
         red, green, blue = scale_bar.color
         luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
         contrast = (0, 0, 0) if luminance >= 140 else (255, 255, 255)
         shadow_width = width + 2
         draw.line((left, bar_y, right, bar_y), fill=contrast, width=shadow_width)
         draw.line((left, bar_y, right, bar_y), fill=scale_bar.color, width=width)
-        draw.text(
-            (text_x, text_y),
-            label,
-            font=font,
-            fill=scale_bar.color,
-            stroke_width=1,
-            stroke_fill=contrast,
-        )
+        if scale_bar.show_text:
+            font = _font(scale_bar.font_size_px or scale_bar_font_size(output.size))
+            label = format_scale_bar_length(scale_bar.length_um)
+            text_box = draw.textbbox((0, 0), label, font=font, stroke_width=1)
+            text_width = text_box[2] - text_box[0]
+            text_height = text_box[3] - text_box[1]
+            gap = max(4, width + 1)
+            text_x = center_x - text_width / 2
+            text_y = bar_y - gap - text_height
+            draw.text(
+                (text_x, text_y),
+                label,
+                font=font,
+                fill=scale_bar.color,
+                stroke_width=1,
+                stroke_fill=contrast,
+            )
 
     return output
 
@@ -724,14 +757,11 @@ def _intersection_area(
     return width * height
 
 
-def _draw_arrow(
-    draw: ImageDraw.ImageDraw,
+def roi_label_arrow_points(
     label_box: tuple[float, float, float, float],
     roi: ROIResult,
-    color: tuple[int, int, int],
-    line_width: int,
-) -> None:
-    """从标签边缘画一根箭头，箭头尖端落在 ROI 矩形边缘。"""
+) -> tuple[float, float, float, float]:
+    """返回从标签边缘到 ROI 矩形边缘的连线端点。"""
 
     label_cx = (label_box[0] + label_box[2]) / 2
     label_cy = (label_box[1] + label_box[3]) / 2
@@ -751,6 +781,19 @@ def _draw_arrow(
     scale = min(tx, ty)
     end_x = roi_cx + toward_label_x * scale
     end_y = roi_cy + toward_label_y * scale
+    return start_x, start_y, end_x, end_y
+
+
+def _draw_arrow(
+    draw: ImageDraw.ImageDraw,
+    label_box: tuple[float, float, float, float],
+    roi: ROIResult,
+    color: tuple[int, int, int],
+    line_width: int,
+) -> None:
+    """从标签边缘画一根箭头，箭头尖端落在 ROI 矩形边缘。"""
+
+    start_x, start_y, end_x, end_y = roi_label_arrow_points(label_box, roi)
 
     draw.line((start_x, start_y, end_x, end_y), fill=color, width=line_width)
 
@@ -782,29 +825,32 @@ def _draw_arrow(
     )
 
 
-def draw_rois(
-    image: Image.Image,
-    items: list[tuple[ROIResult, str, tuple[int, int, int]]],
-) -> Image.Image:
-    """统一绘制多个 ROI，并自动避让相邻的框和标签。
+def _roi_render_metrics(
+    image_size: tuple[int, int],
+) -> tuple[int, int, ImageFont.FreeTypeFont | ImageFont.ImageFont, int, int, int, int]:
+    """集中返回 ROI 框与标签共用的绘图尺寸。"""
 
-    每个 item 是 ``(ROI结果, 两行标签, RGB颜色)``。程序先画全部框，再按顺序
-    选择标签位置。默认位置发生遮挡时，会尝试框的下、左、右及更远的对角位置，
-    并从移动后的标签画箭头指回对应 ROI。
-    """
-
-    output = image.copy().convert("RGB")
-    draw = ImageDraw.Draw(output)
-    line_width = max(3, round(min(output.size) / 350))
+    line_width = max(3, round(min(image_size) / 350))
     cross = max(6, line_width * 2)
-    font = _font(max(16, round(min(output.size) / 65)))
+    font = _font(max(16, round(min(image_size) / 65)))
     text_spacing = max(2, line_width)
     margin = max(6, line_width * 2)
     near_gap = max(12, line_width * 3)
-    far_gap = max(36, round(min(output.size) / 45))
+    far_gap = max(36, round(min(image_size) / 45))
+    return line_width, cross, font, text_spacing, margin, near_gap, far_gap
 
-    # 第一步：先画完所有矩形和中心十字，避免后画的框覆盖已放置标签。
-    roi_obstacles: list[tuple[float, float, float, float]] = []
+
+def draw_roi_geometry(
+    image: Image.Image,
+    items: list[tuple[ROIResult, str, tuple[int, int, int]]],
+) -> Image.Image:
+    """只绘制 ROI 矩形与中心十字，不绘制文字标签。"""
+
+    output = image.copy().convert("RGB")
+    draw = ImageDraw.Draw(output)
+    line_width, cross, _font_value, _spacing, _margin, _near, _far = _roi_render_metrics(
+        output.size
+    )
     for roi, _label, color in items:
         left, top, right, bottom = roi.box
         visible_box = (
@@ -818,23 +864,33 @@ def draw_rois(
         cx, cy = roi.center_x_px, roi.center_y_px
         draw.line((cx - cross, cy, cx + cross, cy), fill=color, width=line_width)
         draw.line((cx, cy - cross, cx, cy + cross), fill=color, width=line_width)
+    return output
+
+
+def layout_roi_labels(
+    image: Image.Image,
+    items: list[tuple[ROIResult, str, tuple[int, int, int]]],
+) -> list[ROILabelPlacement]:
+    """计算自动避让后的 ROI 标签位置，不修改图像。"""
+
+    draw = ImageDraw.Draw(image)
+    line_width, _cross, font, text_spacing, margin, near_gap, far_gap = _roi_render_metrics(
+        image.size
+    )
+    roi_obstacles: list[tuple[float, float, float, float]] = []
+    for roi, _label, _color in items:
+        left, top, right, bottom = roi.box
         roi_obstacles.append((left - margin, top - margin, right + margin, bottom + margin))
 
-    # 第二步：为每个标签计算多个候选位置，优先选择不遮挡任何框/标签的位置。
     placed_labels: list[tuple[float, float, float, float]] = []
-    placements: list[
-        tuple[ROIResult, str, tuple[int, int, int], float, float, float, float, bool]
-    ] = []
-
-    for item_index, (roi, label, color) in enumerate(items):
+    placements: list[ROILabelPlacement] = []
+    for roi, label, color in items:
         measured = draw.multiline_textbbox(
             (0, 0), label, font=font, spacing=text_spacing, stroke_width=1
         )
         text_width = measured[2] - measured[0]
         text_height = measured[3] - measured[1]
         left, top, right, bottom = roi.box
-
-        # 第一个候选是原来的“紧贴框上方”；其余候选逐渐远离框。
         candidates = (
             (left, top - text_height - near_gap),
             (left, bottom + near_gap),
@@ -848,17 +904,14 @@ def draw_rois(
 
         best: tuple[float, int, float, float, tuple[float, float, float, float]] | None = None
         for candidate_index, (raw_x, raw_y) in enumerate(candidates):
-            # 把候选位置限制在图像内部。
-            x = min(max(margin, raw_x), max(margin, output.width - text_width - margin))
-            y = min(max(margin, raw_y), max(margin, output.height - text_height - margin))
+            x = min(max(margin, raw_x), max(margin, image.width - text_width - margin))
+            y = min(max(margin, raw_y), max(margin, image.height - text_height - margin))
             background_box = (
                 x - 4,
                 y - 4,
                 x + text_width + 5,
                 y + text_height + 5,
             )
-
-            # 遮挡 ROI 的代价最高，其次是遮挡已经放置的标签。
             roi_overlap = sum(_intersection_area(background_box, box) for box in roi_obstacles)
             label_overlap = sum(_intersection_area(background_box, box) for box in placed_labels)
             distance = math.hypot(x - left, y - (top - text_height - near_gap))
@@ -870,37 +923,58 @@ def draw_rois(
         assert best is not None
         _score, candidate_index, text_x, text_y, background_box = best
         placed_labels.append(background_box)
-        # 多图时，标签只要不在原始紧邻位置，就用箭头明确对应关系。
-        use_arrow = len(items) > 1 and candidate_index != 0
-        placements.append((roi, label, color, text_x, text_y, text_width, text_height, use_arrow))
-
-    # 第三步：箭头先画，标签黑色背景后画，这样连线不会穿过文字。
-    for roi, _label, color, text_x, text_y, text_width, text_height, use_arrow in placements:
-        if use_arrow:
-            label_box = (
-                text_x - 4,
-                text_y - 4,
-                text_x + text_width + 5,
-                text_y + text_height + 5,
+        placements.append(
+            ROILabelPlacement(
+                roi=roi,
+                label=label,
+                color=color,
+                text_x=text_x,
+                text_y=text_y,
+                text_width=text_width,
+                text_height=text_height,
+                use_arrow=len(items) > 1 and candidate_index != 0,
             )
-            _draw_arrow(draw, label_box, roi, color, line_width)
-
-    for _roi, label, color, text_x, text_y, text_width, text_height, _use_arrow in placements:
-        draw.rectangle(
-            (text_x - 4, text_y - 4, text_x + text_width + 5, text_y + text_height + 5),
-            fill=(0, 0, 0),
         )
+    return placements
+
+
+def draw_roi_labels(
+    image: Image.Image,
+    placements: Iterable[ROILabelPlacement],
+) -> Image.Image:
+    """在图像副本上绘制已定位的 ROI 标签和对应箭头。"""
+
+    output = image.copy().convert("RGB")
+    draw = ImageDraw.Draw(output)
+    line_width, _cross, font, text_spacing, _margin, _near, _far = _roi_render_metrics(
+        output.size
+    )
+    placement_list = list(placements)
+    for placement in placement_list:
+        if placement.use_arrow:
+            _draw_arrow(draw, placement.box, placement.roi, placement.color, line_width)
+    for placement in placement_list:
+        draw.rectangle(placement.box, fill=(0, 0, 0))
         draw.multiline_text(
-            (text_x, text_y),
-            label,
+            (placement.text_x, placement.text_y),
+            placement.label,
             font=font,
-            fill=color,
+            fill=placement.color,
             spacing=text_spacing,
             stroke_width=1,
             stroke_fill=(0, 0, 0),
         )
-
     return output
+
+
+def draw_rois(
+    image: Image.Image,
+    items: list[tuple[ROIResult, str, tuple[int, int, int]]],
+) -> Image.Image:
+    """统一绘制多个 ROI，并自动避让相邻的框和标签。"""
+
+    geometry = draw_roi_geometry(image, items)
+    return draw_roi_labels(geometry, layout_roi_labels(image, items))
 
 
 def draw_roi(
@@ -912,6 +986,26 @@ def draw_roi(
     """保留单 ROI 绘图接口；内部调用统一的多 ROI 排版函数。"""
 
     return draw_rois(image, [(roi, label, color)])
+
+
+def save_export_image(
+    image: Image.Image,
+    output_path: str | Path,
+    jpeg_quality: int = 95,
+) -> Path:
+    """保存 JPG/PNG；JPG 使用可控质量，PNG 始终保持无损。"""
+
+    if not 1 <= jpeg_quality <= 100:
+        raise ValueError("JPEG quality must be between 1 and 100.")
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    kwargs = (
+        {"quality": jpeg_quality}
+        if output.suffix.lower() in {".jpg", ".jpeg"}
+        else {}
+    )
+    image.save(output, **kwargs)
+    return output.resolve()
 
 
 def _print_metadata(title: str, metadata: ND2Metadata) -> None:
@@ -1022,13 +1116,9 @@ def locate_rois(
     # 所有 ROI 坐标齐备后一次性排版，才能让标签避开其他框和标签。
     annotated = draw_rois(base, drawing_items)
 
-    # 自动创建输出父目录。JPG 使用 quality=95，PNG 使用 Pillow 默认无损参数。
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    save_kwargs = {"quality": 95} if output.suffix.lower() in {".jpg", ".jpeg"} else {}
-    annotated.save(output, **save_kwargs)
-    print(f"\nCompleted.\nOutput saved to:\n{output.resolve()}")
-    return output.resolve()
+    output = save_export_image(annotated, output_path, jpeg_quality=95)
+    print(f"\nCompleted.\nOutput saved to:\n{output}")
+    return output
 
 
 def locate_roi(

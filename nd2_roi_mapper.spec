@@ -7,7 +7,7 @@ import sys
 
 
 project_root = Path(SPECPATH)
-app_version = os.environ.get("ND2_ROI_MAPPER_VERSION", "1.1.0")
+app_version = os.environ.get("ND2_ROI_MAPPER_VERSION", "1.1.1")
 is_windows = sys.platform == "win32"
 
 # Keep the frozen application reproducible and avoid collecting packages from the

@@ -16,7 +16,11 @@ ND2 ROI Mapper 是一个面向显微成像实验的 Windows/macOS 桌面工具�
 - 使用不同颜色区分多个 ROI，并自动避让相邻标签。
 - 支持 10X 图像的适应窗口、缩放、平移和像素坐标查看。
 - 支持可拖动的 10X 比例尺，以及限制在各自 ROI 内的 Zoom in 比例尺。
-- 比例尺默认白色、10 µm；右键可选择 1000/100/10/1 µm、颜色、线宽和位置。
+- 比例尺默认位于右下角，白色、10 µm；右键可选择长度、颜色、线宽、文字大小，
+  或完全隐藏比例尺文字。
+- ROI 文件名与拍摄参数标签可在以对应 Zoom-in FOV 为中心的小范围内拖动，并支持
+  位置预设、自动复位和键盘微调。
+- JPG 可选择 Maximum 100、High 95、Balanced 85 或 Compact 75 导出质量；PNG 始终无损。
 - 导出全分辨率 JPG（默认）或 PNG。
 
 ## 系统要求
@@ -28,11 +32,11 @@ ND2 ROI Mapper 是一个面向显微成像实验的 Windows/macOS 桌面工具�
 
 ## 下载与运行
 
-v1.1.0 GitHub Release 不再提供 Windows Setup EXE，提供以下压缩包：
+v1.1.1 GitHub Release 不提供 Windows Setup EXE，提供以下压缩包：
 
 ### Windows Portable
 
-下载 `ND2-ROI-Mapper-Windows-Portable-v1.1.0.zip`，完整解压后双击其中的：
+下载 `ND2-ROI-Mapper-Windows-Portable-v1.1.1.zip`，完整解压后双击其中的：
 
 ```text
 ND2 ROI Mapper.exe
@@ -44,8 +48,8 @@ ND2 ROI Mapper.exe
 
 根据 Mac 芯片选择：
 
-- Apple Silicon（M1/M2/M3/M4 等）：`ND2-ROI-Mapper-macOS-Apple-Silicon-v1.1.0.zip`
-- Intel：`ND2-ROI-Mapper-macOS-Intel-v1.1.0.zip`
+- Apple Silicon（M1/M2/M3/M4 等）：`ND2-ROI-Mapper-macOS-Apple-Silicon-v1.1.1.zip`
+- Intel：`ND2-ROI-Mapper-macOS-Intel-v1.1.1.zip`
 
 完整解压后，将 `ND2 ROI Mapper.app` 拖入 `Applications`，再打开应用。当前 macOS
 应用尚未使用 Apple Developer ID 签名或公证；首次运行可能需要在 Finder 中按住
@@ -88,9 +92,13 @@ python nd2_roi_locator.py
 7. 可点击 Viewer 顶部的 `10X scale bar` 或 `Zoom in scale bar`：
    - 拖动比例尺改变位置；10X 比例尺限制在 overview 内，Zoom in 比例尺限制在
      各自 ROI 内。
-   - 右键比例尺可设置物理长度、颜色、线宽或位置预设。
+   - 右键比例尺可设置物理长度、颜色、线宽、文字显示、文字大小或位置预设。
    - 选中比例尺后也可用 `Shift + 方向键` 微调位置。
-8. 点击 `Export Annotated Image`，保存为 JPG 或 PNG。
+8. ROI 标签可以在对应 FOV 中心附近拖动；右键标签可复位或选择相对位置，选中后
+   同样可用 `Shift + 方向键` 微调。
+9. 在 Export 中选择格式。JPG 可进一步选择质量等级；PNG 为无损格式，因此质量
+   控件会禁用。
+10. 点击 `Export Annotated Image`，保存为 JPG 或 PNG。
 
 移除 10X overview 时，程序会同时清空依赖该底图的高倍文件列表和 ROI 预览，
 避免把不同采集批次的数据混合映射。
@@ -154,7 +162,7 @@ OBJECTIVE_OFFSET = {
 ├── build_macos_release.sh   # 构建并验证 macOS App ZIP
 ├── .github/workflows/       # 原生 Windows、Apple Silicon 与 Intel 构建
 ├── tests/                   # 比例尺物理换算和范围约束测试
-├── installer/               # v1.0.0 的旧 Inno Setup 配置，不用于 v1.1.0
+├── installer/               # v1.0.0 的旧 Inno Setup 配置，不用于 v1.1.1
 ├── packaging/               # 打包 hook 与 Windows 版本资源
 ├── pyproject.toml           # Python 格式化规则
 ├── .editorconfig            # 编辑器编码、缩进和换行规则
@@ -180,6 +188,8 @@ OBJECTIVE_OFFSET = {
 - 不同 Nikon/NIS-Elements 版本的 metadata 结构可能不同。必要字段缺失时，GUI
   会显示可读错误；命令行模式会输出完整 metadata 结构，便于进一步适配。
 - 比例尺当前为水平方向，物理长度使用 10X 的 X 向像素尺寸。
+- ROI 标签只能在对应高倍 FOV 中心附近移动，不能任意拖到与来源视野无关的位置。
+- 导出质量等级仅适用于 JPG；PNG 始终采用无损编码。
 - macOS 应用尚未使用 Apple Developer ID 签名或 Apple notarization。
 
 ## 构建 Release
@@ -187,19 +197,19 @@ OBJECTIVE_OFFSET = {
 Windows 构建机需要 Windows 10/11 x64 和 Python 3.13：
 
 ```powershell
-.\build_release.ps1 -Version 1.1.0 -PythonVersion 3.13
+.\build_release.ps1 -Version 1.1.1 -PythonVersion 3.13
 ```
 
 脚本会在项目内创建隔离的 `.build-venv`，安装构建依赖，并使用 PyInstaller 生成：
 
 ```text
-release/ND2-ROI-Mapper-Windows-Portable-v1.1.0.zip
+release/ND2-ROI-Mapper-Windows-Portable-v1.1.1.zip
 ```
 
 macOS 必须在对应架构的 Mac 上原生构建：
 
 ```bash
-bash ./build_macos_release.sh 1.1.0 Apple-Silicon
+bash ./build_macos_release.sh 1.1.1 Apple-Silicon
 ```
 
 项目的 GitHub Actions 会分别在 Windows x64、macOS Apple Silicon 和 macOS Intel

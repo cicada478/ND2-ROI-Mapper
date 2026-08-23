@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import unittest
+from tempfile import TemporaryDirectory
 
 from PIL import Image
 
-from nd2_roi_locator import ScaleBarOverlay, draw_scale_bars
-from nd2_roi_ui import ImageViewer, ScaleBarState
+from nd2_roi_locator import (
+    ROIResult,
+    ScaleBarOverlay,
+    draw_roi_geometry,
+    draw_roi_labels,
+    draw_rois,
+    draw_scale_bars,
+    layout_roi_labels,
+    scale_bar_label_size,
+    save_export_image,
+)
+from nd2_roi_ui import ImageViewer, ROILabelState, ScaleBarState
 
 
 class ScaleBarOverlayTests(unittest.TestCase):
@@ -46,6 +57,19 @@ class ScaleBarOverlayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pixel size"):
             _ = bar.length_px
 
+    def test_hidden_text_removes_label_from_scale_bar_bounds(self) -> None:
+        shown = scale_bar_label_size(10, (1200, 800), font_size_px=48, show_text=True)
+        hidden = scale_bar_label_size(10, (1200, 800), font_size_px=48, show_text=False)
+        self.assertGreater(shown[0], 0)
+        self.assertGreater(shown[1], 0)
+        self.assertEqual(hidden, (0, 0))
+
+    def test_text_size_changes_rendered_label_dimensions(self) -> None:
+        small = scale_bar_label_size(10, (1200, 800), font_size_px=14)
+        large = scale_bar_label_size(10, (1200, 800), font_size_px=48)
+        self.assertGreater(large[0], small[0])
+        self.assertGreater(large[1], small[1])
+
 
 class ScaleBarBoundsTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -74,6 +98,77 @@ class ScaleBarBoundsTests(unittest.TestCase):
             length_um=100,
         )
         self.assertIsNone(self.viewer._scale_bar_limits(state))
+
+    def test_bottom_right_preset_uses_maximum_allowed_coordinates(self) -> None:
+        state = ScaleBarState(
+            key="overview",
+            scope_name="10X overview",
+            bounds=(0, 0, 1000, 600),
+            pixel_size_um=0.5,
+        )
+        limits = self.viewer._scale_bar_limits(state)
+        self.assertIsNotNone(limits)
+        assert limits is not None
+        self.assertTrue(self.viewer._place_scale_bar(state, "bottom-right"))
+        self.assertEqual((state.center_x_px, state.bar_y_px), (limits[1], limits[3]))
+
+
+class ROILabelLayerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.image = Image.new("RGB", (800, 500), (12, 18, 24))
+        self.roi = ROIResult(
+            center_x_px=400,
+            center_y_px=250,
+            width_px=160,
+            height_px=100,
+            dx_um=0,
+            dy_um=0,
+            dx_px=0,
+            dy_px=0,
+            offset_x_um=0,
+            offset_y_um=0,
+        )
+        self.items = [(self.roi, "sample.nd2\nObjective 100X | Zoom 2×", (255, 218, 56))]
+
+    def test_split_geometry_and_label_layers_match_combined_render(self) -> None:
+        geometry = draw_roi_geometry(self.image, self.items)
+        placements = layout_roi_labels(self.image, self.items)
+        split = draw_roi_labels(geometry, placements)
+        combined = draw_rois(self.image, self.items)
+        self.assertEqual(split.tobytes(), combined.tobytes())
+
+    def test_label_drag_limits_stay_near_roi_center_and_inside_image(self) -> None:
+        placement = layout_roi_labels(self.image, self.items)[0]
+        state = ROILabelState(
+            key="roi-label-1",
+            index=1,
+            placement=placement,
+            text_x=-10_000,
+            text_y=10_000,
+            automatic_x=placement.text_x,
+            automatic_y=placement.text_y,
+        )
+        viewer = ImageViewer.__new__(ImageViewer)
+        viewer._image = self.image
+        viewer._clamp_roi_label(state)
+        min_x, max_x, min_y, max_y = viewer._roi_label_limits(state)
+        self.assertGreaterEqual(state.text_x, min_x)
+        self.assertLessEqual(state.text_x, max_x)
+        self.assertGreaterEqual(state.text_y, min_y)
+        self.assertLessEqual(state.text_y, max_y)
+
+
+class ExportQualityTests(unittest.TestCase):
+    def test_jpeg_quality_changes_encoded_file_size(self) -> None:
+        image = Image.effect_noise((320, 240), 80).convert("RGB")
+        with TemporaryDirectory() as directory:
+            maximum = save_export_image(image, f"{directory}/maximum.jpg", jpeg_quality=100)
+            compact = save_export_image(image, f"{directory}/compact.jpg", jpeg_quality=75)
+            self.assertGreater(maximum.stat().st_size, compact.stat().st_size)
+
+    def test_invalid_jpeg_quality_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "between 1 and 100"):
+            save_export_image(Image.new("RGB", (10, 10)), "unused.jpg", jpeg_quality=0)
 
 
 if __name__ == "__main__":
